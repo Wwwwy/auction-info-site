@@ -1,0 +1,18 @@
+{
+  "name": "auction-info-site",
+  "version": "0.1.0",
+  "description": "경매 낙찰결과 스크래퍼 및 분석 사이트",
+  "type": "module",
+  "scripts": {
+    "scrape": "bun run scripts/seed-historical.ts",
+    "discover": "bun run scripts/discover-endpoints.ts",
+    "test": "bun run proto/test.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "latest"
+  }
+}

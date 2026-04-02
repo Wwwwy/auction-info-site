@@ -1,0 +1,26 @@
+name: IP 차단 테스트 (courtauction.go.kr)
+
+on:
+  workflow_dispatch:  # 수동 실행
+
+jobs:
+  check-ip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 의존성 설치
+        run: npm install
+
+      - name: Playwright 브라우저 설치
+        run: npx playwright install chromium --with-deps
+
+      - name: IP 차단 상태 확인
+        run: node proto/check-ip-blocked.mjs
