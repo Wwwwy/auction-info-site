@@ -1,0 +1,63 @@
+name: 낙찰결과 수집 (courtauction.go.kr)
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: '수집 시작일 (YYYY-MM-DD, 기본: 1개월 전)'
+        required: false
+        default: ''
+      to:
+        description: '수집 종료일 (YYYY-MM-DD, 기본: 어제)'
+        required: false
+        default: ''
+      courts:
+        description: '법원 (쉼표 구분, 예: 서울중앙,인천 / 기본: 전체)'
+        required: false
+        default: '서울중앙'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 의존성 설치
+        run: npm install
+
+      - name: Playwright 브라우저 설치
+        run: npx playwright install chromium --with-deps
+
+      - name: 낙찰결과 수집
+        run: |
+          ARGS=""
+          [ -n "${{ github.event.inputs.from }}" ] && ARGS="$ARGS --from ${{ github.event.inputs.from }}"
+          [ -n "${{ github.event.inputs.to }}" ] && ARGS="$ARGS --to ${{ github.event.inputs.to }}"
+          [ -n "${{ github.event.inputs.courts }}" ] && ARGS="$ARGS --courts ${{ github.event.inputs.courts }}"
+          node --experimental-strip-types scripts/seed-historical.ts $ARGS --output /tmp/auction-results.json
+
+      - name: 결과 파일 확인
+        run: |
+          ls -lh /tmp/auction-results.json
+          node -e "
+            const d = JSON.parse(require('fs').readFileSync('/tmp/auction-results.json'));
+            console.log('수집 완료:', d.meta.parsed, '건');
+            console.log('기간:', d.meta.from, '~', d.meta.to);
+            if (d.results.length > 0) {
+              console.log('샘플:', JSON.stringify(d.results[0], null, 2));
+            }
+          "
+
+      - name: 결과 artifact 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: auction-results-${{ github.run_id }}
+          path: /tmp/auction-results.json
+          retention-days: 30
