@@ -22,5 +22,9 @@ jobs:
       - name: Playwright 브라우저 설치
         run: npx playwright install chromium --with-deps
 
-      - name: IP 차단 상태 확인
+      - name: IP 차단 상태 확인 (기본)
         run: node proto/check-ip-blocked.mjs
+        continue-on-error: true
+
+      - name: IP 차단 상태 확인 (스텔스 모드)
+        run: node proto/check-ip-stealth.mjs
