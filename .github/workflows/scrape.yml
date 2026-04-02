@@ -24,21 +24,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: IP 차단 사전 확인
-        run: |
-          RESP=$(curl -s -X POST "https://www.courtauction.go.kr/pgj/pgjsearch/selectDspslSchdRsltSrch.on" \
-            -H "Content-Type: application/json" \
-            -H "Referer: https://www.courtauction.go.kr/" \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            -d '{"dma_pageInfo":{"pageNo":1,"pageSize":1,"totalYn":"Y"},"dma_srchGdsDtlSrchInfo":{"statNum":"1","pgmId":"PGJ158M01","cortStDvs":"0","cortOfcCd":"0101","srchStartMaeGiil":"20260301","srchEndMaeGiil":"20260331"}}' \
-            --max-time 15)
-          echo "응답: $RESP"
-          if echo "$RESP" | grep -q '"ipcheck":false'; then
-            echo "❌ IP가 차단됐습니다. 수집을 중단합니다."
-            exit 1
-          fi
-          echo "✅ IP 정상 — 수집을 시작합니다."
-
       - name: Node.js 설정
         uses: actions/setup-node@v4
         with:
