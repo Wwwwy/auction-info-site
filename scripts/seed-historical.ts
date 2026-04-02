@@ -298,18 +298,18 @@ class AuctionScraper {
     };
 
     try {
-      const result = await safeEvaluate(this.page, async () => {
-        return new Promise((resolve, reject) => {
+      const result = await this.page.evaluate(async (bodyArg) => {
+        return new Promise<string>((resolve, reject) => {
           fetch('/pgj/pgjsearch/selectDspslSchdRsltSrch.on', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*' },
-            body: JSON.stringify(body),
+            body: JSON.stringify(bodyArg),
           })
             .then(res => res.text())
             .then(resolve)
             .catch(reject);
         });
-      });
+      }, body);
 
       // JSON 파싱
       const parsed = JSON.parse(result as string);
