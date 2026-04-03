@@ -1,0 +1,97 @@
+name: 물건사진 수집 (courtauction.go.kr)
+
+on:
+  workflow_dispatch:
+    inputs:
+      court:
+        description: '법원 이름'
+        required: false
+        default: '서울중앙지방법원'
+      limit:
+        description: '수집 건수 (1=단건 테스트, 0=전체)'
+        required: false
+        default: '1'
+      dry_run:
+        description: 'dry-run (API 탐색만, 파일 저장 안 함)'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  collect-photos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 의존성 설치
+        run: npm install
+
+      - name: Playwright 브라우저 설치
+        run: npx playwright install chromium --with-deps
+
+      - name: 출력 디렉토리 생성
+        run: mkdir -p /tmp/auction-photos
+
+      - name: 물건사진 수집
+        run: |
+          COURT="${{ github.event.inputs.court || '서울중앙지방법원' }}"
+          LIMIT="${{ github.event.inputs.limit || '1' }}"
+          DRY_RUN="${{ github.event.inputs.dry_run || 'false' }}"
+          ARGS="--court \"$COURT\" --limit $LIMIT --output /tmp/auction-photos"
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS="$ARGS --dry-run true"
+          fi
+          eval node --experimental-strip-types scripts/collect-photos.ts $ARGS
+        timeout-minutes: 25
+
+      - name: 수집 결과 출력
+        if: always()
+        run: |
+          if [ -f /tmp/auction-photos/photo-result.json ]; then
+            python3 -c "
+          import json, os
+          with open('/tmp/auction-photos/photo-result.json') as f:
+              d = json.load(f)
+          meta = d.get('meta', {})
+          results = d.get('results', [])
+          print(f'법원: {meta.get(\"court\")}')
+          print(f'수집일시: {meta.get(\"collectedAt\")}')
+          print(f'dry-run: {meta.get(\"dryRun\")}')
+          print(f'대상 물건: {len(results)}건')
+          print()
+          for r in results:
+              print(f'[{r[\"caseNumber\"]}] {r[\"address\"][:40]}')
+              print(f'  사진: {len(r[\"photos\"])}장')
+              for p in r[\"photos\"]:
+                  print(f'    [{p[\"seq\"]}] {p[\"url\"][:80]} (size={p[\"size\"]})')
+                  if p.get(\"savedPath\"):
+                      saved = p[\"savedPath\"]
+                      size = os.path.getsize(saved) if os.path.exists(saved) else 0
+                      print(f'         → 저장: {saved} ({size} bytes)')
+              print(f'  발견 엔드포인트: {len(r[\"discoveredEndpoints\"])}개')
+              for ep in r[\"discoveredEndpoints\"]:
+                  print(f'    {ep[\"method\"]} {ep[\"url\"][:80]}')
+                  print(f'    ContentType: {ep[\"contentType\"]}, Size: {ep[\"size\"]}')
+          "
+          else
+            echo "결과 파일 없음"
+          fi
+
+      - name: 사진 파일 목록
+        if: always()
+        run: find /tmp/auction-photos -type f | sort
+
+      - name: 결과 파일 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: photo-result-${{ github.run_id }}
+          path: /tmp/auction-photos/
+          retention-days: 30
