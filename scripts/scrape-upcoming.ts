@@ -1,292 +1,347 @@
 /**
  * 매각예정 물건 스크래퍼
- * courtauction.go.kr 에서 현재 매각 예정인 경매물건 수집
+ * https://www.courtauction.go.kr/pgj/ui/pgj100/PGJ157M00.xml
  *
- * 전략: searchControllerMain.on 엔드포인트 사용 (낙찰결과 API와 별개)
- *   - 사건번호 quick search 로 세션 수립 후 응답 인터셉트
- *   - 오늘 이후 maeGiil(매각기일)인 물건만 필터링
+ * 전략:
+ *  1. 법원별 검색 → searchControllerMain.on API 인터셉트 → 리스트 수집
+ *  2. 물건별 소재지 A 태그 클릭 → 상세 페이지 DOM 파싱
+ *  3. 수집 항목: 물건기본정보, 기일내역, 목록내역, 감정평가요항표
+ *  4. 현황조사서/감정평가서는 추후 확장 (별도 탭 열림)
  *
  * 실행:
- *   node --experimental-strip-types scripts/scrape-upcoming.ts [옵션]
+ *  node --experimental-strip-types scripts/scrape-upcoming.ts [옵션]
  * 옵션:
- *   --courts 서울중앙,인천   특정 법원만 (기본: 전체)
- *   --output /tmp/out.json  출력 경로 (기본: /tmp/upcoming-auctions.json)
- *   --dry-run               파싱 결과만 출력, 파일 저장 안함
+ *  --court  서울중앙지방법원  수집할 법원 (기본: 서울중앙지방법원)
+ *  --limit  1               수집할 물건 수 (기본: 1, 전체: 0)
+ *  --output /tmp/out.json   출력 경로
+ *  --dry-run                파일 저장 없이 콘솔 출력만
  */
 
-import { chromium, type Browser, type Page, type Response } from 'playwright';
-import { writeFileSync } from 'fs';
+import { chromium, type Browser, type Page } from 'playwright';
+import { writeFileSync, readFileSync, existsSync } from 'fs';
 
-// ── 법원 코드 ──
-const COURT_CODES: Record<string, string> = {
-  '서울중앙': '0101',
-  '서울동부': '0102',
-  '서울남부': '0103',
-  '서울북부': '0104',
-  '서울서부': '0105',
-  '인천': '0201',
-  '수원': '0301',
-  '성남': '0302',
-  '의정부': '0303',
-  '춘천': '0401',
-  '대전': '0501',
-  '청주': '0502',
-  '대구': '0601',
-  '부산': '0701',
-  '울산': '0702',
-  '창원': '0703',
-  '광주': '0801',
-  '전주': '0802',
-  '제주': '0901',
-  '부천': '1001',
-  '평택': '1002',
-  '안양': '1003',
-  '안산': '1004',
-};
+// ── 법원 코드 (select option value) ──
+const COURT_NAMES = [
+  '서울중앙지방법원', '서울동부지방법원', '서울남부지방법원',
+  '서울북부지방법원', '서울서부지방법원', '의정부지방법원',
+  '인천지방법원', '수원지방법원', '춘천지방법원', '대전지방법원',
+  '청주지방법원', '대구지방법원', '부산지방법원', '울산지방법원',
+  '창원지방법원', '광주지방법원', '전주지방법원', '제주지방법원',
+];
 
 // ── 타입 ──
-interface RawItem {
-  srnSaNo?: string;
-  jiwonNm?: string;
-  maeGiil?: string;
-  gamevalAmt?: string;
-  maeAmt?: string;
-  mulStatcd?: string;
-  dspslUsgNm?: string;
-  printSt?: string;
-  srchHjguRdCd?: string;
-  yuchalCnt?: string;
-  pjbBuldList?: string;
-  [key: string]: unknown;
+interface ListItem {
+  docid: string;
+  boCd: string;
+  saNo: string;
+  maemulSer: string | number;
+  mokmulSer: string | number;
+  srnSaNo: string;
+  jiwonNm: string;
+  maeGiil: string;
+  gamevalAmt: string | number;
+  notifyMinmaePrice1: string | number;
+  notifyMinmaePriceRate1: string | number;
+  yuchalCnt: string | number;
+  dspslUsgNm: string;
+  printSt: string;
+  srchHjguRdCd: string;
+  jpDeptNm: string;
+  maePlace: string;
+  hjguSido: string;
+  hjguSigu: string;
+  hjguDong: string;
+  pjbBuldList: string;
 }
 
-interface UpcomingItem {
+interface DateRecord {
+  date: string;
+  type: string;
+  place: string;
+  minPrice: string;
+  result: string;
+}
+
+interface PropertyRecord {
+  no: string;
+  category: string;
+  detail: string;
+}
+
+interface DetailData {
+  // 기본 정보 (리스트에서 수집)
+  docid: string;
   caseNumber: string;
   courtName: string;
-  auctionDate: string;
+  department: string;
+  propertyNo: number;
   propertyType: string;
-  appraisedValue: number;
-  failedBids: number;
-  status: string;
-  address: string | null;
+  address: string;
   dongCode: string | null;
   areaSqm: number | null;
+  appraisedValue: number;
+  minBidPrice: number;
+  minBidRate: number;
+  failedBids: number;
+  auctionDate: string;
+  auctionPlace: string;
+  sido: string;
+  sigu: string;
+  dong: string;
+  // 상세 페이지에서 수집
+  caseAcceptDate: string;
+  auctionStartDate: string;
+  dividendDeadline: string;
+  claimAmount: string;
+  dateRecords: DateRecord[];
+  propertyRecords: PropertyRecord[];
+  appraisalSummary: string;
+  photos: string[];
+  collectedAt: string;
 }
 
-// ── 파서 ──
-function parseItem(raw: RawItem): UpcomingItem {
-  const areaMatch = raw.pjbBuldList?.match(/(\d+\.?\d*)㎡/);
-  return {
-    caseNumber: raw.srnSaNo || '',
-    courtName: raw.jiwonNm || '',
-    auctionDate: raw.maeGiil || '',
-    propertyType: raw.dspslUsgNm || '',
-    appraisedValue: Number(raw.gamevalAmt || 0),
-    failedBids: Number(raw.yuchalCnt || 0),
-    status: raw.mulStatcd || '',
-    address: raw.printSt || null,
-    dongCode: raw.srchHjguRdCd && /^\d{10}$/.test(raw.srchHjguRdCd)
-      ? raw.srchHjguRdCd
-      : null,
-    areaSqm: areaMatch ? parseFloat(areaMatch[1]) : null,
-  };
-}
-
-function today(): string {
-  return new Date().toISOString().slice(0, 10).replace(/-/g, '');
-}
-
+// ── 유틸 ──
 function delay(ms: number) {
   return new Promise<void>(r => setTimeout(r, ms));
 }
 
+function parseArea(pjbBuldList: string): number | null {
+  const m = pjbBuldList?.match(/(\d+\.?\d*)㎡/);
+  return m ? parseFloat(m[1]) : null;
+}
+
 // ── 스크래퍼 ──
 class UpcomingAuctionScraper {
-  private page: Page | null = null;
-  private browser: Browser | null = null;
-  private collectedData: UpcomingItem[] = [];
-  private seenCases = new Set<string>();
+  private page!: Page;
+  private browser!: Browser;
 
-  private stats = { searches: 0, total: 0, upcoming: 0, errors: 0 };
-
-  async initialize(): Promise<void> {
-    console.log('[1] 브라우저 초기화 (스텔스 모드)...');
+  async init(): Promise<void> {
+    console.log('[브라우저] 스텔스 초기화...');
     this.browser = await chromium.launch({
       headless: true,
       args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-blink-features=AutomationControlled',
-        '--window-size=1920,1080',
-        '--lang=ko-KR',
+        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+        '--disable-gpu', '--disable-blink-features=AutomationControlled',
+        '--window-size=1920,1080', '--lang=ko-KR',
       ],
     });
-
-    const context = await this.browser.newContext({
+    const ctx = await this.browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       viewport: { width: 1920, height: 1080 },
       locale: 'ko-KR',
       timezoneId: 'Asia/Seoul',
-      extraHTTPHeaders: {
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-      },
     });
-
-    await context.addInitScript(() => {
+    await ctx.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });
       (window as Record<string, unknown>).chrome = { runtime: {} };
-      delete (window as Record<string, unknown>).__playwright;
     });
-
-    this.page = await context.newPage();
-
-    console.log('[2] 메인 페이지 로드 (세션 획득)...');
-    await this.page.goto('https://www.courtauction.go.kr/pgj/index.on', {
-      waitUntil: 'networkidle',
-      timeout: 40000,
-    });
-    await delay(2000 + Math.random() * 1000);
-
-    const cookies = await context.cookies();
-    console.log(`    쿠키: ${cookies.map(c => c.name).join(', ')}`);
+    this.page = await ctx.newPage();
   }
 
-  async searchByTerm(term: string): Promise<void> {
-    if (!this.page) throw new Error('page not initialized');
+  /** 매각예정 페이지 로드 + 법원 선택 + 검색 */
+  async searchCourt(courtName: string): Promise<ListItem[]> {
+    console.log(`\n[검색] ${courtName}...`);
 
-    this.stats.searches++;
-    console.log(`\n[검색] "${term}"...`);
+    await this.page.goto(
+      'https://www.courtauction.go.kr/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ157M00.xml',
+      { waitUntil: 'networkidle', timeout: 40000 }
+    );
+    await delay(1500);
 
-    let captured: RawItem[] = [];
+    // 법원 선택
+    await this.page.selectOption(
+      '#mf_wfm_mainFrame_sbx_dspslSchdGdsCortOfc',
+      courtName
+    );
+    await delay(500);
 
-    const handler = async (res: Response) => {
+    // 날짜 범위 확인 (기본값 사용)
+    const startDate = await this.page.inputValue('#mf_wfm_mainFrame_cal_dspslSchdGdsPerdStr_input');
+    const endDate = await this.page.inputValue('#mf_wfm_mainFrame_cal_dspslSchdGdsPerdEnd_input');
+    console.log(`    기간: ${startDate} ~ ${endDate}`);
+
+    // searchControllerMain.on 응답 인터셉트
+    let listData: ListItem[] = [];
+    const handler = async (res: import('playwright').Response) => {
       if (res.url().includes('searchControllerMain.on')) {
         try {
           const text = await res.text();
-          console.log(`    raw(100): ${text.slice(0, 100)}`);
           const json = JSON.parse(text);
           const items = json.data?.dlt_srchResult || [];
           const total = json.data?.dma_pageInfo?.totalCnt || 0;
-          console.log(`    totalCnt: ${total} | 수신: ${items.length}건`);
-          captured = items;
+          listData = items;
+          console.log(`    총 ${total}건 수신 ${items.length}건 (ipcheck:${json.data?.ipcheck})`);
         } catch (e) {
-          console.log(`    파싱 실패: ${e}`);
+          console.log('    리스트 파싱 오류:', e);
         }
       }
     };
 
     this.page.on('response', handler);
+    await this.page.click('#mf_wfm_mainFrame_btn_dspslSchdGdsSrch');
+    await delay(7000);
+    this.page.off('response', handler);
 
-    try {
-      await this.page.locator('#mf_ibx_auctnTrmCtt').fill(term);
-      await delay(300);
-      await this.page.locator('#mf_btn_quickSearchGds').click();
-      await delay(6000);
-    } finally {
-      this.page.off('response', handler);
-    }
-
-    const todayStr = today();
-    let newCount = 0;
-
-    for (const raw of captured) {
-      this.stats.total++;
-      const maeGiil = String(raw.maeGiil || '');
-      // 미래 매각기일 or 기일 없는 진행중 물건
-      if (maeGiil && maeGiil < todayStr) continue;
-      this.stats.upcoming++;
-
-      const item = parseItem(raw as RawItem);
-      if (!item.caseNumber || this.seenCases.has(item.caseNumber)) continue;
-
-      this.seenCases.add(item.caseNumber);
-      this.collectedData.push(item);
-      newCount++;
-    }
-
-    console.log(`    오늘 이후: ${newCount}건 수집 (누적: ${this.collectedData.length})`);
+    return listData;
   }
 
-  async run(options: {
-    courts?: string[];
-    output?: string;
-    dryRun?: boolean;
-  } = {}): Promise<void> {
-    const outputPath = options.output || '/tmp/upcoming-auctions.json';
+  /** 물건 상세 페이지 수집 (소재지 A 태그 클릭) */
+  async collectDetail(item: ListItem, index: number): Promise<DetailData> {
+    console.log(`\n  [${index}] ${item.srnSaNo} 상세 수집...`);
 
-    await this.initialize();
+    // 소재지 링크 클릭 (address 텍스트 포함 A 태그)
+    const addressText = item.printSt.split('\n')[0].trim();
+    const shortAddr = addressText.split('(')[0].trim(); // 괄호 이전 부분
 
-    // 검색 전략:
-    // quicksearch("2026타경") → searchControllerMain.on 응답 인터셉트
-    // 연도별 검색 → 각 페이지 수집 → 오늘 이후 maeGiil 필터
-    // ※ quick search는 첫 페이지만 반환하므로 여러 검색어 조합
-    const currentYear = new Date().getFullYear();
-    const searchTerms: string[] = [
-      `${currentYear}타경`,     // 올해 전체
-      `${currentYear - 1}타경`, // 전년도 (미완료 사건)
-    ];
-
-    const targetCourts = options.courts
-      ? options.courts.filter(c => COURT_CODES[c])
-      : Object.keys(COURT_CODES);
-
-    console.log(`\n[3] 총 ${searchTerms.length}개 검색어로 수집 시작`);
-    console.log(`    기준일(오늘): ${today()}`);
-    console.log(`    대상 법원: ${targetCourts.join(', ')}`);
-
-    for (const term of searchTerms) {
+    try {
+      // 소재지 A 태그 클릭 (주소 텍스트로 찾기)
+      const addrLocator = this.page.locator('a').filter({
+        hasText: shortAddr.slice(0, 15),
+      }).first();
+      await addrLocator.waitFor({ timeout: 5000 });
+      await addrLocator.click();
+      await delay(4000);
+    } catch {
+      // 대체: 사건번호 텍스트 포함 행의 첫 번째 A 태그
       try {
-        await this.searchByTerm(term);
-        await delay(3000 + Math.random() * 2000);
-      } catch (e) {
-        this.stats.errors++;
-        console.log(`    [오류] ${term}: ${e}`);
+        await this.page.evaluate((srnSaNo) => {
+          const tds = Array.from(document.querySelectorAll('td, div'));
+          for (const td of tds) {
+            if (td.textContent?.includes(srnSaNo)) {
+              const a = td.querySelector('a') || (td.tagName === 'A' ? td : null);
+              if (a) { (a as HTMLElement).click(); return; }
+            }
+          }
+        }, item.srnSaNo);
+        await delay(4000);
+      } catch (e2) {
+        console.log(`    클릭 실패: ${e2}`);
       }
     }
 
-    console.log(`\n[완료] 총 ${this.collectedData.length}건 수집`);
-    console.log(`  검색 횟수: ${this.stats.searches}`);
-    console.log(`  전체 수신: ${this.stats.total}`);
-    console.log(`  오늘 이후: ${this.stats.upcoming}`);
-    console.log(`  오류: ${this.stats.errors}`);
-
-    if (!options.dryRun) {
-      const out = {
-        meta: {
-          collectedAt: new Date().toISOString(),
-          today: today(),
-          totalItems: this.collectedData.length,
-          courts: targetCourts,
-        },
-        results: this.collectedData,
+    // 상세 DOM 파싱
+    const detail = await this.page.evaluate(() => {
+      // 테이블 파싱 헬퍼
+      const parseTable = (captionText: string): Record<string, string> => {
+        const tables = Array.from(document.querySelectorAll('table'));
+        const tbl = tables.find(t =>
+          t.querySelector('caption')?.textContent?.includes(captionText)
+        );
+        if (!tbl) return {};
+        const result: Record<string, string> = {};
+        tbl.querySelectorAll('tr').forEach(tr => {
+          const ths = Array.from(tr.querySelectorAll('th')).map(t => t.textContent?.trim() || '');
+          const tds = Array.from(tr.querySelectorAll('td')).map(t => t.textContent?.trim() || '');
+          ths.forEach((th, i) => { if (th && tds[i]) result[th] = tds[i]; });
+        });
+        return result;
       };
-      writeFileSync(outputPath, JSON.stringify(out, null, 2));
-      console.log(`[저장] ${outputPath} (${this.collectedData.length}건)`);
-    } else {
-      console.log('[dry-run] 샘플 5건:');
-      this.collectedData.slice(0, 5).forEach((item, i) => {
-        console.log(`  [${i + 1}] ${item.caseNumber} | ${item.auctionDate} | ${item.propertyType} | 감정가: ${(item.appraisedValue / 1e8).toFixed(1)}억`);
+
+      // 기일내역 - caption "기일" 포함 테이블, 날짜 패턴인 행만
+      const dateRecords: Array<{date: string; type: string; place: string; minPrice: string; result: string}> = [];
+      const dateTables = Array.from(document.querySelectorAll('table')).filter(t =>
+        t.querySelector('caption')?.textContent?.includes('기일') &&
+        !t.querySelector('caption')?.textContent?.includes('물건번호')
+      );
+      dateTables.forEach(tbl => {
+        tbl.querySelectorAll('tbody tr').forEach(tr => {
+          const cells = Array.from(tr.querySelectorAll('td')).map(td => td.textContent?.trim() || '');
+          // 날짜 패턴 (2026.xx.xx) 포함된 행만 수집
+          if (cells.length >= 3 && /^\d{4}\.\d{2}\.\d{2}/.test(cells[0])) {
+            dateRecords.push({
+              date: cells[0] || '',
+              type: cells[1] || '',
+              place: cells[2] || '',
+              minPrice: cells[3] || '',
+              result: cells[4] || '',
+            });
+          }
+        });
       });
-    }
+
+      // 목록내역
+      const propRecords: Array<{no: string; category: string; detail: string}> = [];
+      const propTables = Array.from(document.querySelectorAll('table')).filter(t =>
+        t.querySelector('caption')?.textContent?.includes('목록')
+      );
+      propTables.forEach(tbl => {
+        tbl.querySelectorAll('tbody tr').forEach(tr => {
+          const cells = Array.from(tr.querySelectorAll('td')).map(td => td.textContent?.trim() || '');
+          if (cells.length >= 2) {
+            propRecords.push({ no: cells[0] || '', category: cells[1] || '', detail: cells[2] || '' });
+          }
+        });
+      });
+
+      // 물건기본정보
+      const basicInfo = parseTable('사건번호,물건번호,물건종류');
+
+      // 사건정보 (접수일 등)
+      const caseInfo = parseTable('사건접수,경매개시일');
+
+      // 감정평가요항표 요약 텍스트 - innerText에서 직접 추출
+      let appraisalSummary = '';
+      const fullText = document.body.innerText;
+      const appraisalIdx = fullText.indexOf('감정평가요항표 요약');
+      if (appraisalIdx >= 0) {
+        // 다음 주요 섹션("목록내역"이나 "기일내역") 이전까지
+        const endMarkers = ['제공된 정보가', '법원경매정보 홈페이지', '★ 참고사항'];
+        let endIdx = fullText.length;
+        for (const marker of endMarkers) {
+          const idx = fullText.indexOf(marker, appraisalIdx);
+          if (idx > 0 && idx < endIdx) endIdx = idx;
+        }
+        appraisalSummary = fullText.slice(appraisalIdx, Math.min(appraisalIdx + 4000, endIdx)).trim();
+      }
+
+      // 물건 사진 (img 태그)
+      const photos = Array.from(document.querySelectorAll('img[src*="photo"], img[src*="Photo"], img[src*="img"]'))
+        .map(img => (img as HTMLImageElement).src)
+        .filter(src => src.includes('http') && !src.includes('icon') && !src.includes('btn'));
+
+      return { basicInfo, caseInfo, dateRecords, propRecords, appraisalSummary, photos };
+    });
+
+    return {
+      docid: item.docid,
+      caseNumber: item.srnSaNo,
+      courtName: item.jiwonNm,
+      department: item.jpDeptNm,
+      propertyNo: Number(item.maemulSer),
+      propertyType: item.dspslUsgNm,
+      address: item.printSt,
+      dongCode: item.srchHjguRdCd && /^\d{10}$/.test(item.srchHjguRdCd) ? item.srchHjguRdCd : null,
+      areaSqm: parseArea(item.pjbBuldList),
+      appraisedValue: Number(item.gamevalAmt),
+      minBidPrice: Number(item.notifyMinmaePrice1),
+      minBidRate: Number(item.notifyMinmaePriceRate1),
+      failedBids: Number(item.yuchalCnt),
+      auctionDate: item.maeGiil,
+      auctionPlace: item.maePlace,
+      sido: item.hjguSido,
+      sigu: item.hjguSigu,
+      dong: item.hjguDong,
+      caseAcceptDate: detail.caseInfo['사건접수'] || '',
+      auctionStartDate: detail.caseInfo['경매개시일'] || '',
+      dividendDeadline: detail.caseInfo['배당요구종기'] || '',
+      claimAmount: detail.caseInfo['청구금액'] || '',
+      dateRecords: detail.dateRecords,
+      propertyRecords: detail.propRecords,
+      appraisalSummary: detail.appraisalSummary,
+      photos: detail.photos,
+      collectedAt: new Date().toISOString(),
+    };
   }
 
   async close(): Promise<void> {
-    if (this.browser) await this.browser.close();
+    await this.browser?.close();
   }
 }
 
 // ── CLI ──
-function parseArgs(): Record<string, string | string[]> {
+function parseArgs(): Record<string, string> {
   const args = process.argv.slice(2);
-  const result: Record<string, string | string[]> = {};
+  const result: Record<string, string> = {};
   for (let i = 0; i < args.length; i++) {
     if (args[i].startsWith('--')) {
       const key = args[i].slice(2);
@@ -297,14 +352,64 @@ function parseArgs(): Record<string, string | string[]> {
 }
 
 const args = parseArgs();
-const scraper = new UpcomingAuctionScraper();
+const courtName = args['court'] || '서울중앙지방법원';
+const limit = parseInt(args['limit'] ?? '1');
+const outputPath = args['output'] || '/tmp/upcoming-single.json';
+const dryRun = args['dry-run'] === 'true';
 
+const scraper = new UpcomingAuctionScraper();
 try {
-  await scraper.run({
-    courts: args['courts'] ? String(args['courts']).split(',').map(s => s.trim()) : undefined,
-    output: args['output'] ? String(args['output']) : undefined,
-    dryRun: args['dry-run'] === 'true',
-  });
+  await scraper.init();
+
+  // 1. 리스트 수집
+  const listItems = await scraper.searchCourt(courtName);
+  if (listItems.length === 0) {
+    console.log('수집된 물건 없음');
+    process.exit(0);
+  }
+
+  const targets = limit > 0 ? listItems.slice(0, limit) : listItems;
+  console.log(`\n[상세 수집] ${targets.length}건 시작...`);
+
+  // 2. 각 물건 상세 수집
+  const results: DetailData[] = [];
+  for (let i = 0; i < targets.length; i++) {
+    const item = targets[i] as ListItem;
+    try {
+      const detail = await scraper.collectDetail(item, i + 1);
+      results.push(detail);
+
+      // 수집 요약 출력
+      console.log(`    ✅ ${detail.caseNumber} | ${detail.propertyType} | 감정가:${(detail.appraisedValue/1e8).toFixed(1)}억 | 매각기일:${detail.auctionDate}`);
+      console.log(`       주소: ${detail.address}`);
+      console.log(`       기일내역: ${detail.dateRecords.length}건, 목록내역: ${detail.propertyRecords.length}건`);
+      if (detail.appraisalSummary) {
+        console.log(`       감정평가 요약: ${detail.appraisalSummary.slice(0, 100)}...`);
+      }
+
+      await delay(2000);
+    } catch (e) {
+      console.log(`    ❌ ${item.srnSaNo} 실패: ${e}`);
+    }
+  }
+
+  // 3. 저장
+  const output = {
+    meta: {
+      court: courtName,
+      collectedAt: new Date().toISOString(),
+      total: results.length,
+    },
+    results,
+  };
+
+  if (!dryRun) {
+    writeFileSync(outputPath, JSON.stringify(output, null, 2));
+    console.log(`\n[저장] ${outputPath} (${results.length}건)`);
+  } else {
+    console.log('\n[dry-run] 결과:');
+    console.log(JSON.stringify(output, null, 2).slice(0, 2000));
+  }
 } finally {
   await scraper.close();
 }

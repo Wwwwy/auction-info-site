@@ -3,22 +3,22 @@ name: 매각예정 물건 수집 (courtauction.go.kr)
 on:
   workflow_dispatch:
     inputs:
-      courts:
-        description: '법원 (쉼표 구분, 예: 서울중앙,인천 / 기본: 전체)'
+      court:
+        description: '법원 이름 (예: 서울중앙지방법원)'
         required: false
-        default: ''
-      dry_run:
-        description: 'dry-run (파일 저장 없이 로그만)'
+        default: '서울중앙지방법원'
+      limit:
+        description: '수집 건수 (1=단건 테스트, 0=전체)'
         required: false
-        default: 'false'
+        default: '1'
   schedule:
-    # 매일 오전 8시 (KST = UTC+9, 즉 UTC 23:00 전날)
+    # 매일 오전 8시 KST (UTC 23:00 전날)
     - cron: '0 23 * * *'
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -30,62 +30,45 @@ jobs:
 
       - name: 의존성 설치
         run: npm install
+        working-directory: .
 
       - name: Playwright 브라우저 설치
         run: npx playwright install chromium --with-deps
 
       - name: 매각예정 물건 수집
         run: |
-          ARGS=""
-          if [ -n "${{ github.event.inputs.courts }}" ]; then
-            ARGS="$ARGS --courts ${{ github.event.inputs.courts }}"
-          fi
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
-          fi
+          COURT="${{ github.event.inputs.court || '서울중앙지방법원' }}"
+          LIMIT="${{ github.event.inputs.limit || '1' }}"
           node --experimental-strip-types scripts/scrape-upcoming.ts \
-            --output /tmp/upcoming-auctions.json \
-            $ARGS
-        timeout-minutes: 15
+            --court "$COURT" \
+            --limit "$LIMIT" \
+            --output /tmp/upcoming-result.json
+        timeout-minutes: 25
 
-      - name: 결과 통계 출력
+      - name: 결과 통계
         if: always()
         run: |
-          if [ -f /tmp/upcoming-auctions.json ]; then
+          if [ -f /tmp/upcoming-result.json ]; then
             python3 -c "
-          import json, sys
-          with open('/tmp/upcoming-auctions.json') as f:
+          import json
+          with open('/tmp/upcoming-result.json') as f:
               d = json.load(f)
           meta = d.get('meta', {})
           results = d.get('results', [])
-          print(f'수집일시: {meta.get(\"collectedAt\",\"?\")}')
-          print(f'총 건수: {len(results)}건')
-          if results:
-              courts = {}
-              types = {}
-              for r in results:
-                  c = r.get('courtName', '?')
-                  courts[c] = courts.get(c, 0) + 1
-                  t = r.get('propertyType', '?')
-                  types[t] = types.get(t, 0) + 1
-              print('법원별:')
-              for k, v in sorted(courts.items(), key=lambda x: -x[1])[:10]:
-                  print(f'  {k}: {v}건')
-              print('물건종류별:')
-              for k, v in sorted(types.items(), key=lambda x: -x[1])[:10]:
-                  print(f'  {k}: {v}건')
-              # 가장 가까운 매각기일 5건
-              upcoming = sorted([r for r in results if r.get('auctionDate')], key=lambda x: x['auctionDate'])[:5]
-              print('가장 가까운 매각기일:')
-              for r in upcoming:
-                  print(f'  {r[\"auctionDate\"]} | {r[\"caseNumber\"]} | {r[\"propertyType\"]} | {r.get(\"address\",\"주소없음\")[:30]}')
+          print(f'법원: {meta.get(\"court\")}')
+          print(f'수집일시: {meta.get(\"collectedAt\")}')
+          print(f'수집 건수: {len(results)}건')
+          for r in results[:5]:
+              print(f'  - {r[\"caseNumber\"]} | {r[\"propertyType\"]} | {r[\"auctionDate\"]} | {r[\"address\"][:40]}')
+              print(f'    감정가:{r[\"appraisedValue\"]:,} | 최저:{r[\"minBidPrice\"]:,}({r[\"minBidRate\"]}%) | 유찰:{r[\"failedBids\"]}회')
+              print(f'    기일:{len(r[\"dateRecords\"])}건 | 목록:{len(r[\"propertyRecords\"])}건 | 감정평가:{len(r[\"appraisalSummary\"])}자')
           "
           fi
 
-      - name: 결과 업로드 (artifact)
+      - name: 결과 파일 업로드
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: upcoming-auctions-${{ github.run_id }}
-          path: /tmp/upcoming-auctions.json
-          retention-days: 7
+          name: upcoming-result-${{ github.run_id }}
+          path: /tmp/upcoming-result.json
+          retention-days: 30
