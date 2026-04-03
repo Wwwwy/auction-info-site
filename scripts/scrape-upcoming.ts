@@ -16,8 +16,11 @@
  *  --all-courts                  전체 18개 법원 순환
  *  --limit      1                수집할 물건 수 (기본: 1, 전체: 0)
  *  --output     /tmp/out.json    출력 경로
- *  --state-file /tmp/state.json  증분 수집용 state 파일 (이미 수집한 docid 추적)
+ *  --state-file  /tmp/state.json  증분 수집용 state 파일 (이미 수집한 docid 추적)
  *  --dry-run                     파일 저장 없이 콘솔 출력만
+ *
+ * PDF 수집: 감정평가서 버튼 클릭 시 kapanet 뷰어 탭이 열리고
+ *           PDF 응답을 자동으로 인터셉트해 pdfBase64 필드에 저장
  */
 
 import { chromium, type Browser, type Page } from 'playwright';
@@ -94,6 +97,9 @@ interface GamjeongData {
   appraisalDate: string;   // 감정일
   reportDate: string;      // 작성일
   opinion: string;         // 감정 의견
+  viewerUrl: string;       // ca.kapanet.or.kr 뷰어 URL
+  pdfUrl: string | null;   // 실제 PDF 다운로드 URL (동적, 뷰어 로드 시 발급)
+  pdfBase64: string | null; // PDF 바이너리 (base64), --download-pdf 옵션 시만 수집
 }
 
 interface DetailData {
@@ -378,7 +384,13 @@ class UpcomingAuctionScraper {
       result.hwangwang = docs.hwangwang;
       result.gamjeong = docs.gamjeong;
       if (docs.hwangwang) console.log(`       현황조사서: 임차인 ${docs.hwangwang.tenants.length}명`);
-      if (docs.gamjeong) console.log(`       감정평가서: ${docs.gamjeong.appraisalNo} (${docs.gamjeong.appraiserName})`);
+      if (docs.gamjeong) {
+        const g = docs.gamjeong;
+        const pdfStatus = g.pdfBase64
+          ? `✅ PDF ${Math.round(g.pdfBase64.length * 0.75 / 1024)}KB`
+          : (g.pdfUrl ? '🔗 URL만' : '없음');
+        console.log(`       감정평가서: ${g.appraisalNo} (${g.appraiserName}) [${pdfStatus}]`);
+      }
     } catch (e) {
       console.log(`    현황/감정 수집 실패: ${e}`);
     }
@@ -392,20 +404,16 @@ class UpcomingAuctionScraper {
   async collectHwangwangGamjeong(): Promise<{ hwangwang: HwangwangData | null; gamjeong: GamjeongData | null }> {
     let hwangwangRaw: Record<string, unknown> | null = null;
     let gamjeongRaw: Record<string, unknown> | null = null;
+    let capturedPdfUrl: string | null = null;
+    let capturedPdfBytes: Buffer | null = null;
 
-    // API 응답 인터셉터 설정
+    // API 응답 인터셉터 (현황/감정 JSON)
     const handler = async (res: import('playwright').Response) => {
       const url = res.url();
       if (url.includes('selectCurstExmndc.on')) {
-        try {
-          const json = await res.json();
-          hwangwangRaw = json?.data ?? null;
-        } catch { /* ignore */ }
+        try { hwangwangRaw = (await res.json())?.data ?? null; } catch { /* ignore */ }
       } else if (url.includes('selectAeeWevlInfo.on')) {
-        try {
-          const json = await res.json();
-          gamjeongRaw = json?.data ?? null;
-        } catch { /* ignore */ }
+        try { gamjeongRaw = (await res.json())?.data ?? null; } catch { /* ignore */ }
       }
     };
 
@@ -417,22 +425,57 @@ class UpcomingAuctionScraper {
       const visible = await hwangBtn.isVisible().catch(() => false);
       if (visible) {
         await hwangBtn.click();
-        await delay(3000); // API 응답 대기
+        await delay(3000);
       }
     } catch (e) {
       console.log(`    현황조사서 버튼 클릭 실패: ${e}`);
     }
 
-    // ── 감정평가서 버튼 클릭 ──
+    // ── 감정평가서 버튼 클릭 → 새 탭에서 PDF URL + 바이너리 캡처 ──
+    // Context 레벨 핸들러를 클릭 전에 등록해 새 탭의 PDF 응답도 놓치지 않음
+    const pdfHandler = async (res: import('playwright').Response) => {
+      const url = res.url();
+      if (url.includes('kapanet.or.kr') && url.endsWith('.pdf') && !capturedPdfUrl) {
+        capturedPdfUrl = url;
+        try { capturedPdfBytes = await res.body(); } catch { /* ignore */ }
+      }
+    };
+    this.page.context().on('response', pdfHandler);
+
     try {
       const gamBtn = this.page.locator('#mf_wfm_mainFrame_btn_aeeWevl1');
       const visible = await gamBtn.isVisible().catch(() => false);
       if (visible) {
+        const newPagePromise = this.page.context().waitForEvent('page', { timeout: 8000 }).catch(() => null);
         await gamBtn.click();
-        await delay(3000); // API 응답 대기
+        const newTab = await newPagePromise;
+        if (newTab) {
+          await newTab.waitForLoadState('domcontentloaded').catch(() => null);
+          await delay(4000); // PDF 요청 대기
+          await newTab.close().catch(() => null);
+        } else {
+          await delay(4000);
+        }
       }
     } catch (e) {
       console.log(`    감정평가서 버튼 클릭 실패: ${e}`);
+    }
+
+    this.page.context().off('response', pdfHandler);
+
+    // PDF URL은 잡혔으나 bytes가 없는 경우 — context.request로 직접 다운로드 (쿠키 공유)
+    if (capturedPdfUrl && !capturedPdfBytes) {
+      try {
+        const apiRes = await this.page.context().request.get(capturedPdfUrl, { timeout: 20000 });
+        if (apiRes.ok()) {
+          capturedPdfBytes = await apiRes.body();
+          console.log(`    감정평가서 PDF 다운로드: ${capturedPdfBytes?.length ?? 0} bytes`);
+        } else {
+          console.log(`    [PDF] 다운로드 실패 status=${apiRes.status()}`);
+        }
+      } catch (e) {
+        console.log(`    [PDF] 다운로드 오류: ${e}`);
+      }
     }
 
     this.page.off('response', handler);
@@ -471,12 +514,23 @@ class UpcomingAuctionScraper {
     if (gamjeongRaw) {
       const inf = (gamjeongRaw as Record<string, unknown>).dma_ordTsIndvdAeeWevlInf as Record<string, unknown> | undefined;
       if (inf) {
+        // Viewer URL: ca.kapanet.or.kr/view/{cortOfcCd}/{csNo}/{ordTsCnt}/{aeeWevlNo}/{dspslPrcCrtrYmd}
+        const cortOfcCd = String(inf.cortOfcCd ?? '').replace(/^B/, ''); // B000210 → 000210
+        const csNo = String(inf.csNo ?? '');
+        const ordTsCnt = String(inf.ordTsCnt ?? '1');
+        const aeeWevlNo = String(inf.aeeWevlNo ?? '');
+        const dspslPrcCrtrYmd = String(inf.dspslPrcCrtrYmd ?? '');
+        const viewerUrl = `https://ca.kapanet.or.kr/view/${cortOfcCd}/${csNo}/${ordTsCnt}/${aeeWevlNo}/${dspslPrcCrtrYmd}`;
+
         gamjeong = {
-          appraisalNo: String(inf.aeeWevlNo ?? ''),
+          appraisalNo: aeeWevlNo,
           appraiserName: String(inf.aeeEvlExamrNm ?? ''),
           appraisalDate: String(inf.exmnYmd ?? ''),
-          reportDate: String(inf.wrtYmd ?? ''),
+          reportDate: dspslPrcCrtrYmd,
           opinion: String(inf.fstmEvlDcsnOponCtt ?? ''),
+          viewerUrl,
+          pdfUrl: capturedPdfUrl,
+          pdfBase64: capturedPdfBytes ? capturedPdfBytes.toString('base64') : null,
         };
       }
     }
