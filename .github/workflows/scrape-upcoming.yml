@@ -1,0 +1,91 @@
+name: 매각예정 물건 수집 (courtauction.go.kr)
+
+on:
+  workflow_dispatch:
+    inputs:
+      courts:
+        description: '법원 (쉼표 구분, 예: 서울중앙,인천 / 기본: 전체)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'dry-run (파일 저장 없이 로그만)'
+        required: false
+        default: 'false'
+  schedule:
+    # 매일 오전 8시 (KST = UTC+9, 즉 UTC 23:00 전날)
+    - cron: '0 23 * * *'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 의존성 설치
+        run: npm install
+
+      - name: Playwright 브라우저 설치
+        run: npx playwright install chromium --with-deps
+
+      - name: 매각예정 물건 수집
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.courts }}" ]; then
+            ARGS="$ARGS --courts ${{ github.event.inputs.courts }}"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          node --experimental-strip-types scripts/scrape-upcoming.ts \
+            --output /tmp/upcoming-auctions.json \
+            $ARGS
+        timeout-minutes: 15
+
+      - name: 결과 통계 출력
+        if: always()
+        run: |
+          if [ -f /tmp/upcoming-auctions.json ]; then
+            python3 -c "
+          import json, sys
+          with open('/tmp/upcoming-auctions.json') as f:
+              d = json.load(f)
+          meta = d.get('meta', {})
+          results = d.get('results', [])
+          print(f'수집일시: {meta.get(\"collectedAt\",\"?\")}')
+          print(f'총 건수: {len(results)}건')
+          if results:
+              courts = {}
+              types = {}
+              for r in results:
+                  c = r.get('courtName', '?')
+                  courts[c] = courts.get(c, 0) + 1
+                  t = r.get('propertyType', '?')
+                  types[t] = types.get(t, 0) + 1
+              print('법원별:')
+              for k, v in sorted(courts.items(), key=lambda x: -x[1])[:10]:
+                  print(f'  {k}: {v}건')
+              print('물건종류별:')
+              for k, v in sorted(types.items(), key=lambda x: -x[1])[:10]:
+                  print(f'  {k}: {v}건')
+              # 가장 가까운 매각기일 5건
+              upcoming = sorted([r for r in results if r.get('auctionDate')], key=lambda x: x['auctionDate'])[:5]
+              print('가장 가까운 매각기일:')
+              for r in upcoming:
+                  print(f'  {r[\"auctionDate\"]} | {r[\"caseNumber\"]} | {r[\"propertyType\"]} | {r.get(\"address\",\"주소없음\")[:30]}')
+          "
+          fi
+
+      - name: 결과 업로드 (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upcoming-auctions-${{ github.run_id }}
+          path: /tmp/upcoming-auctions.json
+          retention-days: 7
