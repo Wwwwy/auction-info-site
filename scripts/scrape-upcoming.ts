@@ -12,10 +12,12 @@
  * 실행:
  *  node --experimental-strip-types scripts/scrape-upcoming.ts [옵션]
  * 옵션:
- *  --court  서울중앙지방법원  수집할 법원 (기본: 서울중앙지방법원)
- *  --limit  1               수집할 물건 수 (기본: 1, 전체: 0)
- *  --output /tmp/out.json   출력 경로
- *  --dry-run                파일 저장 없이 콘솔 출력만
+ *  --court      서울중앙지방법원  특정 법원 (기본: 서울중앙지방법원)
+ *  --all-courts                  전체 18개 법원 순환
+ *  --limit      1                수집할 물건 수 (기본: 1, 전체: 0)
+ *  --output     /tmp/out.json    출력 경로
+ *  --state-file /tmp/state.json  증분 수집용 state 파일 (이미 수집한 docid 추적)
+ *  --dry-run                     파일 저장 없이 콘솔 출력만
  */
 
 import { chromium, type Browser, type Page } from 'playwright';
@@ -500,65 +502,178 @@ function parseArgs(): Record<string, string> {
   return result;
 }
 
-const args = parseArgs();
-const courtName = args['court'] || '서울중앙지방법원';
-const limit = parseInt(args['limit'] ?? '1');
-const outputPath = args['output'] || '/tmp/upcoming-single.json';
-const dryRun = args['dry-run'] === 'true';
+// ── State 파일 타입 ──
+interface StateFile {
+  version: number;
+  lastRunAt: string;
+  // docid → 최초 수집일 (ISO string)
+  seenDocIds: Record<string, string>;
+}
 
-const scraper = new UpcomingAuctionScraper();
-try {
-  await scraper.init();
+function loadState(stateFilePath: string | null): StateFile {
+  if (!stateFilePath) return { version: 1, lastRunAt: '', seenDocIds: {} };
+  if (!existsSync(stateFilePath)) {
+    console.log(`[증분] state 파일 없음 (${stateFilePath}) — 전체 수집 모드`);
+    return { version: 1, lastRunAt: '', seenDocIds: {} };
+  }
+  try {
+    const raw = JSON.parse(readFileSync(stateFilePath, 'utf-8')) as StateFile;
+    const count = Object.keys(raw.seenDocIds || {}).length;
+    console.log(`[증분] state 로드: ${count}개 docid 이미 수집됨 (마지막 실행: ${raw.lastRunAt})`);
+    return raw;
+  } catch (e) {
+    console.log(`[증분] state 파일 파싱 실패 — 전체 수집 모드: ${e}`);
+    return { version: 1, lastRunAt: '', seenDocIds: {} };
+  }
+}
 
-  // 1. 리스트 수집
+function saveState(stateFilePath: string, state: StateFile): void {
+  writeFileSync(stateFilePath, JSON.stringify(state, null, 2));
+  console.log(`[증분] state 저장: ${Object.keys(state.seenDocIds).length}개 docid → ${stateFilePath}`);
+}
+
+// ── 단일 법원 수집 (재사용 가능한 함수) ──
+async function collectCourt(
+  scraper: UpcomingAuctionScraper,
+  courtName: string,
+  limit: number,
+  seenDocIds: Record<string, string>,
+  dryRun: boolean,
+): Promise<{ results: DetailData[]; newDocIds: Record<string, string> }> {
   const listItems = await scraper.searchCourt(courtName);
   if (listItems.length === 0) {
-    console.log('수집된 물건 없음');
-    process.exit(0);
+    console.log(`  [${courtName}] 수집된 물건 없음`);
+    return { results: [], newDocIds: {} };
   }
 
-  const targets = limit > 0 ? listItems.slice(0, limit) : listItems;
-  console.log(`\n[상세 수집] ${targets.length}건 시작...`);
+  // 증분 필터: 이미 수집한 docid 제외
+  const newItems = listItems.filter(item => !seenDocIds[item.docid]);
+  const skippedCount = listItems.length - newItems.length;
+  if (skippedCount > 0) {
+    console.log(`  [${courtName}] 전체 ${listItems.length}건 중 기수집 ${skippedCount}건 스킵 → 신규 ${newItems.length}건`);
+  }
 
-  // 2. 각 물건 상세 수집
+  if (newItems.length === 0) {
+    console.log(`  [${courtName}] 신규 물건 없음`);
+    return { results: [], newDocIds: {} };
+  }
+
+  const targets = limit > 0 ? newItems.slice(0, limit) : newItems;
+  console.log(`\n[상세 수집] ${courtName} — ${targets.length}건 시작...`);
+
   const results: DetailData[] = [];
+  const newDocIds: Record<string, string> = {};
+  const now = new Date().toISOString();
+
   for (let i = 0; i < targets.length; i++) {
     const item = targets[i] as ListItem;
     try {
-      const detail = await scraper.collectDetail(item, i + 1);
-      results.push(detail);
-
-      // 수집 요약 출력
-      console.log(`    ✅ ${detail.caseNumber} | ${detail.propertyType} | 감정가:${(detail.appraisedValue/1e8).toFixed(1)}억 | 매각기일:${detail.auctionDate}`);
-      console.log(`       주소: ${detail.address}`);
-      console.log(`       기일내역: ${detail.dateRecords.length}건, 목록내역: ${detail.propertyRecords.length}건`);
-      if (detail.appraisalSummary) {
-        console.log(`       감정평가 요약: ${detail.appraisalSummary.slice(0, 100)}...`);
+      if (!dryRun) {
+        const detail = await scraper.collectDetail(item, i + 1);
+        results.push(detail);
+        console.log(`    ✅ ${detail.caseNumber} | ${detail.propertyType} | 감정가:${(detail.appraisedValue/1e8).toFixed(1)}억 | 매각기일:${detail.auctionDate}`);
+        console.log(`       주소: ${detail.address}`);
+        console.log(`       기일내역: ${detail.dateRecords.length}건, 목록내역: ${detail.propertyRecords.length}건`);
+        if (detail.appraisalSummary) {
+          console.log(`       감정평가 요약: ${detail.appraisalSummary.slice(0, 100)}...`);
+        }
+        await delay(2000);
+      } else {
+        console.log(`    [dry] ${item.srnSaNo} | ${item.dspslUsgNm}`);
       }
-
-      await delay(2000);
+      // 성공 여부와 무관하게 docid를 수집 완료로 기록
+      newDocIds[item.docid] = now;
     } catch (e) {
       console.log(`    ❌ ${item.srnSaNo} 실패: ${e}`);
     }
   }
 
-  // 3. 저장
-  const output = {
-    meta: {
-      court: courtName,
-      collectedAt: new Date().toISOString(),
-      total: results.length,
-    },
-    results,
-  };
+  return { results, newDocIds };
+}
 
-  if (!dryRun) {
-    writeFileSync(outputPath, JSON.stringify(output, null, 2));
-    console.log(`\n[저장] ${outputPath} (${results.length}건)`);
-  } else {
-    console.log('\n[dry-run] 결과:');
-    console.log(JSON.stringify(output, null, 2).slice(0, 2000));
+// ── CLI 실행 ──
+const args = parseArgs();
+const singleCourt = args['court'];
+const allCourts = args['all-courts'] === 'true';
+const limit = parseInt(args['limit'] ?? '1');
+const outputPath = args['output'] || '/tmp/upcoming-single.json';
+const stateFilePath = args['state-file'] || null;
+const dryRun = args['dry-run'] === 'true';
+
+// 수집 대상 법원 목록 결정
+const courtsToScrape: string[] = allCourts
+  ? COURT_NAMES
+  : [singleCourt || '서울중앙지방법원'];
+
+console.log(`\n=== 매각예정 물건 수집 시작 ===`);
+console.log(`법원: ${allCourts ? `전체 ${courtsToScrape.length}개` : courtsToScrape[0]}`);
+console.log(`limit: ${limit === 0 ? '전체' : `${limit}건`}, dry-run: ${dryRun}`);
+console.log(`state-file: ${stateFilePath || '없음 (전체 수집)'}`);
+
+// State 로드
+const state = loadState(stateFilePath);
+
+const allResults: DetailData[] = [];
+let totalNewDocIds: Record<string, string> = {};
+
+// 법원별 수집 (각 법원마다 브라우저 재초기화로 메모리 안정화)
+for (let ci = 0; ci < courtsToScrape.length; ci++) {
+  const courtName = courtsToScrape[ci];
+  console.log(`\n[${ci + 1}/${courtsToScrape.length}] ${courtName} 수집 시작...`);
+
+  const scraper = new UpcomingAuctionScraper();
+  try {
+    await scraper.init();
+    const { results, newDocIds } = await collectCourt(
+      scraper, courtName, limit, state.seenDocIds, dryRun
+    );
+    allResults.push(...results);
+    Object.assign(totalNewDocIds, newDocIds);
+  } catch (e) {
+    console.log(`  [${courtName}] 수집 오류: ${e}`);
+  } finally {
+    await scraper.close();
   }
-} finally {
-  await scraper.close();
+
+  // 법원 간 딜레이 (rate limit 방지)
+  if (ci < courtsToScrape.length - 1) {
+    console.log(`  (다음 법원 전 3초 대기...)`);
+    await delay(3000);
+  }
+}
+
+// State 업데이트 + 저장
+const newCount = Object.keys(totalNewDocIds).length;
+console.log(`\n[완료] 신규 수집: ${newCount}건, 상세 수집: ${allResults.length}건`);
+
+if (stateFilePath && !dryRun && newCount > 0) {
+  Object.assign(state.seenDocIds, totalNewDocIds);
+  state.lastRunAt = new Date().toISOString();
+  saveState(stateFilePath, state);
+}
+
+// 결과 저장
+const output = {
+  meta: {
+    courts: courtsToScrape,
+    collectedAt: new Date().toISOString(),
+    total: allResults.length,
+    newItems: newCount,
+    skippedItems: Object.keys(state.seenDocIds).length - newCount,
+    mode: allCourts ? 'all-courts' : 'single-court',
+    incremental: stateFilePath !== null,
+  },
+  results: allResults,
+};
+
+if (!dryRun) {
+  writeFileSync(outputPath, JSON.stringify(output, null, 2));
+  console.log(`[저장] ${outputPath} (${allResults.length}건)`);
+} else {
+  console.log('\n[dry-run] 메타:');
+  console.log(JSON.stringify(output.meta, null, 2));
+  if (allResults.length > 0) {
+    console.log('[dry-run] 첫 번째 결과:');
+    console.log(JSON.stringify(allResults[0], null, 2).slice(0, 1000));
+  }
 }
