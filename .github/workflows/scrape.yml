@@ -35,6 +35,10 @@ jobs:
       - name: Playwright 브라우저 설치
         run: npx playwright install chromium --with-deps
 
+      - name: IP/브라우저 접근 진단
+        run: node proto/check-ip-stealth.mjs
+        continue-on-error: true
+
       - name: 낙찰결과 수집
         run: |
           ARGS=""
