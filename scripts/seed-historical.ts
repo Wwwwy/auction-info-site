@@ -177,6 +177,7 @@ async function safeEvaluate<T>(page: Page, fn: () => Promise<T>, retries = 3): P
 
 class AuctionScraper {
   private page: Page | null = null;
+  private browser: import('playwright').Browser | null = null;
   private collectedData: ParsedResult[] = [];
   private stats = {
     total: 0,
@@ -188,7 +189,7 @@ class AuctionScraper {
 
   async initialize(): Promise<void> {
     console.log('[1] 브라우저 초기화 (스텔스 모드)...');
-    const browser = await chromium.launch({
+    this.browser = await chromium.launch({
       headless: true,
       args: [
         '--no-sandbox',
@@ -202,7 +203,7 @@ class AuctionScraper {
       ],
     });
 
-    const context = await browser.newContext({
+    const context = await this.browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       viewport: { width: 1920, height: 1080 },
       locale: 'ko-KR',
@@ -475,6 +476,7 @@ class AuctionScraper {
     } finally {
       // 브라우저 정리
       console.log('[완료] 브라우저 종료...');
+      if (this.browser) await this.browser.close();
     }
   }
 }
