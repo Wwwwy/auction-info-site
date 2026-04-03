@@ -61,7 +61,7 @@ jobs:
           for r in results[:5]:
               print(f'  - {r[\"caseNumber\"]} | {r[\"propertyType\"]} | {r[\"auctionDate\"]} | {r[\"address\"][:40]}')
               print(f'    감정가:{r[\"appraisedValue\"]:,} | 최저:{r[\"minBidPrice\"]:,}({r[\"minBidRate\"]}%) | 유찰:{r[\"failedBids\"]}회')
-              print(f'    기일:{len(r[\"dateRecords\"])}건 | 목록:{len(r[\"propertyRecords\"])}건 | 감정평가:{len(r[\"appraisalSummary\"])}자')
+              print(f'    기일:{len(r[\"dateRecords\"])}건 | 목록:{len(r[\"propertyRecords\"])}건 | 감정평가:{len(r[\"appraisalSummary\"])}자 | 사진:{len(r[\"photos\"])}장')
           "
           fi
 

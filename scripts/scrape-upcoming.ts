@@ -323,10 +323,17 @@ class UpcomingAuctionScraper {
         appraisalSummary = fullText.slice(appraisalIdx, Math.min(appraisalIdx + 4000, endIdx)).trim();
       }
 
-      // 물건 사진 (img 태그)
-      const photos = Array.from(document.querySelectorAll('img[src*="photo"], img[src*="Photo"], img[src*="img"]'))
-        .map(img => (img as HTMLImageElement).src)
-        .filter(src => src.includes('http') && !src.includes('icon') && !src.includes('btn'));
+      // 물건 사진 — gen_pic_{N}_img_reltPic 패턴 (base64 내장)
+      // 상세 페이지에서 사진은 data:image/png;base64,... 형식으로 DOM에 직접 포함됨
+      const photos: string[] = [];
+      for (let n = 0; n < 20; n++) {
+        const el = document.getElementById(`mf_wfm_mainFrame_gen_pic_${n}_img_reltPic`) as HTMLImageElement | null;
+        if (!el) break; // ID 패턴이 끊기면 종료
+        const src = el.src || '';
+        if (src.startsWith('data:image/') && src.length > 100) {
+          photos.push(src); // base64 전체 포함
+        }
+      }
 
       return { basicInfo, caseInfo, dateRecords, propRecords, appraisalSummary, photos };
     });
@@ -373,6 +380,8 @@ class UpcomingAuctionScraper {
     } catch (e) {
       console.log(`    현황/감정 수집 실패: ${e}`);
     }
+
+    console.log(`       사진: ${result.photos.length}장`);
 
     return result;
   }
