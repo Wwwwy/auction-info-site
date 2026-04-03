@@ -316,8 +316,16 @@ class AuctionScraper {
       // JSON 파싱
       console.log(`    raw(200): ${(result as string).slice(0, 200)}`);
       const parsed = JSON.parse(result as string);
-      const items = parsed.data?.dlt_srchResult || [];
 
+      // rate-limit 감지: "잠시 후 다시" 에러
+      if (parsed.errors?.errorMessage) {
+        console.warn(`    ⚠ 서버 에러: ${parsed.errors.errorMessage.slice(0, 60)}`);
+        console.warn(`    → 30초 후 재시도...`);
+        await this.page!.waitForTimeout(30000);
+        return this.fetchResultsPage(courtCd, startDate, endDate, pageIndex);
+      }
+
+      const items = parsed.data?.dlt_srchResult || [];
       console.log(`    → ${items.length}건 수신 (ipcheck:${parsed.data?.ipcheck})`);
       return items as RawAuctionResult[];
 
