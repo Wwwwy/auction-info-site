@@ -6,7 +6,8 @@
  *  1. 법원별 검색 → searchControllerMain.on API 인터셉트 → 리스트 수집
  *  2. 물건별 소재지 A 태그 클릭 → 상세 페이지 DOM 파싱
  *  3. 수집 항목: 물건기본정보, 기일내역, 목록내역, 감정평가요항표
- *  4. 현황조사서/감정평가서는 추후 확장 (별도 탭 열림)
+ *  4. 현황조사서: btn_curstExmndcTop 클릭 → selectCurstExmndc.on API
+ *  5. 감정평가서: btn_aeeWevl1 클릭 → selectAeeWevlInfo.on API
  *
  * 실행:
  *  node --experimental-strip-types scripts/scrape-upcoming.ts [옵션]
@@ -68,6 +69,31 @@ interface PropertyRecord {
   detail: string;
 }
 
+// 현황조사서 임차인 정보
+interface LeaseTenant {
+  name: string;         // 임차인명
+  address: string;      // 소재지
+  useType: string;      // 임대 용도 코드
+  moveInDate: string;   // 전입일
+  depositAmount: string; // 보증금
+  leasePart: string;    // 임차 부분
+}
+
+interface HwangwangData {
+  surveyDate: string;       // 조사일시
+  occupancyRelation: string; // 점유관계 요약 텍스트
+  occupancyDetail: string;   // 현황 점유 상세 내용
+  tenants: LeaseTenant[];    // 임차인 목록
+}
+
+interface GamjeongData {
+  appraisalNo: string;     // 감정평가서 번호
+  appraiserName: string;   // 감정평가사명
+  appraisalDate: string;   // 감정일
+  reportDate: string;      // 작성일
+  opinion: string;         // 감정 의견
+}
+
 interface DetailData {
   // 기본 정보 (리스트에서 수집)
   docid: string;
@@ -97,6 +123,9 @@ interface DetailData {
   propertyRecords: PropertyRecord[];
   appraisalSummary: string;
   photos: string[];
+  // 현황조사서 / 감정평가서
+  hwangwang: HwangwangData | null;
+  gamjeong: GamjeongData | null;
   collectedAt: string;
 }
 
@@ -302,7 +331,7 @@ class UpcomingAuctionScraper {
       return { basicInfo, caseInfo, dateRecords, propRecords, appraisalSummary, photos };
     });
 
-    return {
+    const result: DetailData = {
       docid: item.docid,
       caseNumber: item.srnSaNo,
       courtName: item.jiwonNm,
@@ -329,8 +358,119 @@ class UpcomingAuctionScraper {
       propertyRecords: detail.propRecords,
       appraisalSummary: detail.appraisalSummary,
       photos: detail.photos,
+      hwangwang: null,
+      gamjeong: null,
       collectedAt: new Date().toISOString(),
     };
+
+    // ── 현황조사서 / 감정평가서 수집 ──
+    try {
+      const docs = await this.collectHwangwangGamjeong();
+      result.hwangwang = docs.hwangwang;
+      result.gamjeong = docs.gamjeong;
+      if (docs.hwangwang) console.log(`       현황조사서: 임차인 ${docs.hwangwang.tenants.length}명`);
+      if (docs.gamjeong) console.log(`       감정평가서: ${docs.gamjeong.appraisalNo} (${docs.gamjeong.appraiserName})`);
+    } catch (e) {
+      console.log(`    현황/감정 수집 실패: ${e}`);
+    }
+
+    return result;
+  }
+
+  /** 현황조사서 + 감정평가서 수집 (버튼 클릭 → API 인터셉트) */
+  async collectHwangwangGamjeong(): Promise<{ hwangwang: HwangwangData | null; gamjeong: GamjeongData | null }> {
+    let hwangwangRaw: Record<string, unknown> | null = null;
+    let gamjeongRaw: Record<string, unknown> | null = null;
+
+    // API 응답 인터셉터 설정
+    const handler = async (res: import('playwright').Response) => {
+      const url = res.url();
+      if (url.includes('selectCurstExmndc.on')) {
+        try {
+          const json = await res.json();
+          hwangwangRaw = json?.data ?? null;
+        } catch { /* ignore */ }
+      } else if (url.includes('selectAeeWevlInfo.on')) {
+        try {
+          const json = await res.json();
+          gamjeongRaw = json?.data ?? null;
+        } catch { /* ignore */ }
+      }
+    };
+
+    this.page.on('response', handler);
+
+    // ── 현황조사서 버튼 클릭 ──
+    try {
+      const hwangBtn = this.page.locator('#mf_wfm_mainFrame_btn_curstExmndcTop');
+      const visible = await hwangBtn.isVisible().catch(() => false);
+      if (visible) {
+        await hwangBtn.click();
+        await delay(3000); // API 응답 대기
+      }
+    } catch (e) {
+      console.log(`    현황조사서 버튼 클릭 실패: ${e}`);
+    }
+
+    // ── 감정평가서 버튼 클릭 ──
+    try {
+      const gamBtn = this.page.locator('#mf_wfm_mainFrame_btn_aeeWevl1');
+      const visible = await gamBtn.isVisible().catch(() => false);
+      if (visible) {
+        await gamBtn.click();
+        await delay(3000); // API 응답 대기
+      }
+    } catch (e) {
+      console.log(`    감정평가서 버튼 클릭 실패: ${e}`);
+    }
+
+    this.page.off('response', handler);
+
+    // ── 현황조사서 파싱 ──
+    let hwangwang: HwangwangData | null = null;
+    if (hwangwangRaw) {
+      const mng = (hwangwangRaw as Record<string, unknown>).dma_curstExmnMngInf as Record<string, unknown> | undefined;
+      const rletList = ((hwangwangRaw as Record<string, unknown>).dlt_ordTsRlet as Array<Record<string, unknown>>) ?? [];
+      const lserList = ((hwangwangRaw as Record<string, unknown>).dlt_ordTsLserLtn as Array<Record<string, unknown>>) ?? [];
+
+      const occupancyDetail = rletList
+        .map((r) => String(r.gdsPossCtt ?? '').replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '').trim())
+        .filter(Boolean)
+        .join('\n---\n');
+
+      const tenants: LeaseTenant[] = lserList.map((t) => ({
+        name: String(t.intrpsNm ?? ''),
+        address: String(t.printSt ?? ''),
+        useType: String(t.auctnLesUsgCd ?? ''),
+        moveInDate: String(t.mvinDtlCtt ?? ''),
+        depositAmount: String(t.mmrntAmtDts ?? ''),
+        leasePart: String(t.lesPartCtt ?? ''),
+      }));
+
+      hwangwang = {
+        surveyDate: String(mng?.exmnDtDts ?? ''),
+        occupancyRelation: String(mng?.printRltnDts ?? ''),
+        occupancyDetail,
+        tenants,
+      };
+    }
+
+    // ── 감정평가서 파싱 ──
+    let gamjeong: GamjeongData | null = null;
+    if (gamjeongRaw) {
+      const inf = (gamjeongRaw as Record<string, unknown>).dma_ordTsIndvdAeeWevlInf as Record<string, unknown> | undefined;
+      if (inf) {
+        gamjeong = {
+          appraisalNo: String(inf.aeeWevlNo ?? ''),
+          appraiserName: String(inf.aeeEvlExamrNm ?? ''),
+          appraisalDate: String(inf.exmnYmd ?? ''),
+          reportDate: String(inf.wrtYmd ?? ''),
+          opinion: String(inf.fstmEvlDcsnOponCtt ?? ''),
+        };
+      }
+    }
+
+    return { hwangwang, gamjeong };
   }
 
   async close(): Promise<void> {
