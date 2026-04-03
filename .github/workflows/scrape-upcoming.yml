@@ -3,22 +3,36 @@ name: 매각예정 물건 수집 (courtauction.go.kr)
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: '수집 모드'
+        required: false
+        default: 'incremental'
+        type: choice
+        options:
+          - incremental   # 증분 (신규물건만, 전체법원)
+          - full-reset    # 전체 재수집 (state 초기화)
+          - single-court  # 단일 법원 테스트
       court:
-        description: '법원 이름 (예: 서울중앙지방법원)'
+        description: '법원 이름 (single-court 모드 시)'
         required: false
         default: '서울중앙지방법원'
       limit:
-        description: '수집 건수 (1=단건 테스트, 0=전체)'
+        description: '법원별 수집 건수 (0=전체, 1=단건 테스트)'
         required: false
-        default: '1'
+        default: '0'
   schedule:
     # 매일 오전 8시 KST (UTC 23:00 전날)
     - cron: '0 23 * * *'
 
+env:
+  STATE_FILE: /tmp/scrape-state.json
+  OUTPUT_FILE: /tmp/upcoming-result.json
+  NODE_VERSION: '22'
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120  # 전체법원 순환 시 최대 2시간
 
     steps:
       - uses: actions/checkout@v4
@@ -26,49 +40,137 @@ jobs:
       - name: Node.js 설정
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: 의존성 설치
         run: npm install
-        working-directory: .
 
       - name: Playwright 브라우저 설치
         run: npx playwright install chromium --with-deps
 
-      - name: 매각예정 물건 수집
+      # ── 증분 State 복원 ──
+      - name: State 파일 복원 (캐시)
+        id: cache-state
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STATE_FILE }}
+          key: scrape-state-${{ github.run_id }}
+          restore-keys: |
+            scrape-state-
+
+      - name: State 초기화 (full-reset 모드)
+        if: github.event.inputs.mode == 'full-reset'
+        run: |
+          rm -f ${{ env.STATE_FILE }}
+          echo "⚠️ State 초기화 완료 — 전체 재수집 모드"
+
+      - name: State 상태 확인
+        run: |
+          if [ -f "${{ env.STATE_FILE }}" ]; then
+            python3 -c "
+          import json
+          with open('${{ env.STATE_FILE }}') as f:
+              s = json.load(f)
+          seen = len(s.get('seenDocIds', {}))
+          print(f'📋 기수집 docid: {seen}개')
+          print(f'   마지막 실행: {s.get(\"lastRunAt\", \"없음\")}')
+          "
+          else
+            echo "📋 State 없음 — 최초 실행 (전체 수집)"
+          fi
+
+      # ── 수집 실행 ──
+      - name: 매각예정 물건 수집 (증분/전체법원)
+        if: github.event.inputs.mode != 'single-court'
+        run: |
+          MODE="${{ github.event.inputs.mode || 'incremental' }}"
+          LIMIT="${{ github.event.inputs.limit || '0' }}"
+          echo "모드: $MODE, limit: $LIMIT"
+          node --experimental-strip-types scripts/scrape-upcoming.ts \
+            --all-courts \
+            --limit "$LIMIT" \
+            --state-file "${{ env.STATE_FILE }}" \
+            --output "${{ env.OUTPUT_FILE }}"
+        timeout-minutes: 110
+
+      - name: 매각예정 물건 수집 (단일 법원)
+        if: github.event.inputs.mode == 'single-court'
         run: |
           COURT="${{ github.event.inputs.court || '서울중앙지방법원' }}"
-          LIMIT="${{ github.event.inputs.limit || '1' }}"
+          LIMIT="${{ github.event.inputs.limit || '0' }}"
+          echo "법원: $COURT, limit: $LIMIT"
           node --experimental-strip-types scripts/scrape-upcoming.ts \
             --court "$COURT" \
             --limit "$LIMIT" \
-            --output /tmp/upcoming-result.json
-        timeout-minutes: 25
+            --state-file "${{ env.STATE_FILE }}" \
+            --output "${{ env.OUTPUT_FILE }}"
+        timeout-minutes: 30
 
-      - name: 결과 통계
+      # ── State 저장 (캐시) ──
+      - name: State 저장 (캐시 갱신)
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STATE_FILE }}
+          key: scrape-state-${{ github.run_id }}
+
+      # ── 결과 통계 ──
+      - name: 수집 결과 통계
         if: always()
         run: |
-          if [ -f /tmp/upcoming-result.json ]; then
+          if [ -f "${{ env.OUTPUT_FILE }}" ]; then
             python3 -c "
           import json
-          with open('/tmp/upcoming-result.json') as f:
+          with open('${{ env.OUTPUT_FILE }}') as f:
               d = json.load(f)
           meta = d.get('meta', {})
           results = d.get('results', [])
-          print(f'법원: {meta.get(\"court\")}')
+          courts = meta.get('courts', [])
           print(f'수집일시: {meta.get(\"collectedAt\")}')
-          print(f'수집 건수: {len(results)}건')
+          print(f'모드: {meta.get(\"mode\")} / 증분: {meta.get(\"incremental\")}')
+          print(f'법원: {len(courts)}개 ({\" \".join(courts[:3])}...)')
+          print(f'신규 물건: {meta.get(\"newItems\", 0)}건')
+          print(f'상세 수집: {len(results)}건')
+          print(f'기수집 스킵: {meta.get(\"skippedItems\", 0)}건')
+          print()
+          # 법원별 통계
+          from collections import Counter
+          court_counts = Counter(r[\"courtName\"] for r in results)
+          for court, cnt in sorted(court_counts.items(), key=lambda x: -x[1])[:10]:
+              print(f'  {court}: {cnt}건')
+          print()
+          # 상세 (최대 5건)
           for r in results[:5]:
-              print(f'  - {r[\"caseNumber\"]} | {r[\"propertyType\"]} | {r[\"auctionDate\"]} | {r[\"address\"][:40]}')
-              print(f'    감정가:{r[\"appraisedValue\"]:,} | 최저:{r[\"minBidPrice\"]:,}({r[\"minBidRate\"]}%) | 유찰:{r[\"failedBids\"]}회')
-              print(f'    기일:{len(r[\"dateRecords\"])}건 | 목록:{len(r[\"propertyRecords\"])}건 | 감정평가:{len(r[\"appraisalSummary\"])}자')
+              photos = len(r.get(\"photos\", []))
+              print(f'  [{r[\"caseNumber\"]}] {r[\"propertyType\"]} | {r[\"auctionDate\"]} | {r[\"address\"][:35]}')
+              print(f'    감정가:{r[\"appraisedValue\"]:,} | 최저:{r[\"minBidPrice\"]:,}({r[\"minBidRate\"]}%) | 유찰:{r[\"failedBids\"]}회 | 사진:{photos}장')
+          "
+          else
+            echo "결과 파일 없음"
+          fi
+
+      - name: State 최종 상태
+        if: always()
+        run: |
+          if [ -f "${{ env.STATE_FILE }}" ]; then
+            python3 -c "
+          import json
+          with open('${{ env.STATE_FILE }}') as f:
+              s = json.load(f)
+          seen = len(s.get('seenDocIds', {}))
+          print(f'📋 누적 수집 docid: {seen}개')
+          print(f'   마지막 실행: {s.get(\"lastRunAt\")}')
           "
           fi
 
+      # ── 결과 업로드 ──
       - name: 결과 파일 업로드
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: upcoming-result-${{ github.run_id }}
-          path: /tmp/upcoming-result.json
+          path: |
+            ${{ env.OUTPUT_FILE }}
+            ${{ env.STATE_FILE }}
           retention-days: 30
+          if-no-files-found: ignore
