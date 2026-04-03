@@ -235,6 +235,7 @@ class AuctionScraper {
         'Sec-Fetch-Site': 'same-origin',
         'Sec-Fetch-Mode': 'cors',
         'Sec-Fetch-Dest': 'empty',
+        'X-Requested-With': 'XMLHttpRequest',
       };
       await route.continue({ headers });
     });
@@ -312,10 +313,11 @@ class AuctionScraper {
       }, body);
 
       // JSON 파싱
+      console.log(`    raw(200): ${(result as string).slice(0, 200)}`);
       const parsed = JSON.parse(result as string);
       const items = parsed.data?.dlt_srchResult || [];
 
-      console.log(`    → ${items.length}건 수신`);
+      console.log(`    → ${items.length}건 수신 (ipcheck:${parsed.data?.ipcheck})`);
       return items as RawAuctionResult[];
 
     } catch (error) {
