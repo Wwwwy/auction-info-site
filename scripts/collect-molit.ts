@@ -207,7 +207,9 @@ async function validateServiceKey(endpoint: string, serviceKey: string): Promise
 
   const data = await res.json() as ApiResponse;
   const resultCode = data.response?.header?.resultCode;
-  if (resultCode && resultCode !== '00') {
+  // 공공데이터포털 성공 코드: '00' 또는 '000' 모두 허용
+  const isSuccess = !resultCode || resultCode === '00' || resultCode === '000';
+  if (!isSuccess) {
     throw new Error(
       `API 키 오류 [${resultCode}]: ${data.response?.header?.resultMsg}\n` +
       '공공데이터포털에서 "일반 인증키(Decoding)" 값을 사용하고 있는지 확인하세요.'
@@ -247,7 +249,7 @@ async function fetchPage(
   const data = await res.json() as ApiResponse;
   const header = data.response?.header;
 
-  if (header?.resultCode !== '00') {
+  if (header?.resultCode !== '00' && header?.resultCode !== '000') {
     throw new Error(`API 오류 [${header?.resultCode}]: ${header?.resultMsg}`);
   }
 
