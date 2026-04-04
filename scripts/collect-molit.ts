@@ -27,6 +27,14 @@ import { writeFileSync, readFileSync, existsSync } from 'fs';
 // ── API 엔드포인트 ──
 const API_BASE = 'https://apis.data.go.kr/1613000';
 
+// 공공데이터포털 WAF가 curl UA를 400으로 차단하므로 브라우저 헤더 사용
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+  'Referer': 'https://www.data.go.kr/',
+};
+
 const ENDPOINTS: Record<string, string> = {
   'apt-trade':  `${API_BASE}/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev`,
   'apt-rent':   `${API_BASE}/RTMSDataSvcAptRentDev/getRTMSDataSvcAptRentDev`,
@@ -175,14 +183,9 @@ async function validateServiceKey(endpoint: string, serviceKey: string): Promise
     _type: 'json',
   });
   const url = `${endpoint}?serviceKey=${serviceKey}&${params.toString()}`;
-  console.log(`[DEBUG] endpoint: ${endpoint}`);
-  console.log(`[DEBUG] params: ${params.toString()}`);
-  console.log(`[DEBUG] serviceKey 길이: ${serviceKey.length}자`);
-  console.log(`[DEBUG] serviceKey 앞4자: ${serviceKey.slice(0, 4)}`);
-
   let res: Response;
   try {
-    res = await fetch(url, { headers: { Accept: 'application/json' } });
+    res = await fetch(url, { headers: BROWSER_HEADERS });
   } catch (e) {
     throw new Error(`네트워크 오류 — API 서버에 연결할 수 없습니다: ${e}`);
   }
@@ -235,9 +238,7 @@ async function fetchPage(
   });
   const finalUrl = `${endpoint}?serviceKey=${serviceKey}&${otherParams.toString()}`;
 
-  const res = await fetch(finalUrl, {
-    headers: { 'Accept': 'application/json' },
-  });
+  const res = await fetch(finalUrl, { headers: BROWSER_HEADERS });
 
   if (!res.ok) {
     throw new Error(`HTTP ${res.status}: ${res.statusText}`);
