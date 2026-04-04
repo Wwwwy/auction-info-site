@@ -142,7 +142,7 @@ function getPrevMonth(): string {
 }
 
 function expandYmRange(range: string): string[] {
-  const [start, end] = range.split('-');
+  const [start, end] = range.split(/[-~]/);
   if (!end) return [start];
   const months: string[] = [];
   let y = parseInt(start.slice(0, 4));
