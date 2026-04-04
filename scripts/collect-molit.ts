@@ -164,6 +164,52 @@ function saveState(path: string, state: CollectState) {
   writeFileSync(path, JSON.stringify(state, null, 2));
 }
 
+// ── API 키 유효성 검증 ──
+async function validateServiceKey(endpoint: string, serviceKey: string): Promise<void> {
+  // 서울 종로구 최근 1건만 요청해 키 유효성 확인
+  const params = new URLSearchParams({
+    LAWD_CD: '11110',
+    DEAL_YMD: getPrevMonth(),
+    pageNo: '1',
+    numOfRows: '1',
+    _type: 'json',
+  });
+  const url = `${endpoint}?serviceKey=${serviceKey}&${params.toString()}`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { Accept: 'application/json' } });
+  } catch (e) {
+    throw new Error(`네트워크 오류 — API 서버에 연결할 수 없습니다: ${e}`);
+  }
+
+  if (res.status === 403) {
+    throw new Error(
+      '403 Forbidden — serviceKey가 유효하지 않습니다.\n' +
+      '확인 사항:\n' +
+      '  1. GitHub Secret(MOLIT_SERVICE_KEY)에 Decoding된 키가 저장되어 있는지 확인\n' +
+      '     (공공데이터포털 마이페이지 → 인증키 → "일반 인증키(Decoding)" 복사)\n' +
+      '  2. 해당 API 서비스 활용 신청이 승인 상태인지 확인\n' +
+      '  3. 키 앞뒤 공백/개행 문자 포함 여부 확인'
+    );
+  }
+
+  if (!res.ok) {
+    throw new Error(`키 검증 실패: HTTP ${res.status} ${res.statusText}`);
+  }
+
+  const data = await res.json() as ApiResponse;
+  const resultCode = data.response?.header?.resultCode;
+  if (resultCode && resultCode !== '00') {
+    throw new Error(
+      `API 키 오류 [${resultCode}]: ${data.response?.header?.resultMsg}\n` +
+      '공공데이터포털에서 "일반 인증키(Decoding)" 값을 사용하고 있는지 확인하세요.'
+    );
+  }
+
+  console.log('✅ serviceKey 유효성 확인 완료');
+}
+
 // ── API 호출 ──
 async function fetchPage(
   endpoint: string,
@@ -306,6 +352,15 @@ if (dryRun) {
   }
   console.log(`\n총 ${ymList.length * targetCodes.length}건 API 호출 예정`);
   process.exit(0);
+}
+
+// ── API 키 유효성 검증 (수집 시작 전) ──
+console.log('\n🔑 serviceKey 유효성 검증 중...');
+try {
+  await validateServiceKey(endpoint, serviceKey);
+} catch (e) {
+  console.error(`\n❌ ${e instanceof Error ? e.message : e}`);
+  process.exit(1);
 }
 
 // State 로드
