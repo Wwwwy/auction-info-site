@@ -173,15 +173,19 @@ async function fetchPage(
   pageNo: number,
   numOfRows = 1000,
 ): Promise<{ items: Record<string, unknown>[]; totalCount: number }> {
-  const url = new URL(endpoint);
-  url.searchParams.set('serviceKey', serviceKey);
-  url.searchParams.set('LAWD_CD', lawdCd);
-  url.searchParams.set('DEAL_YMD', dealYmd);
-  url.searchParams.set('pageNo', String(pageNo));
-  url.searchParams.set('numOfRows', String(numOfRows));
-  url.searchParams.set('_type', 'json');
+  // serviceKey는 공공데이터포털에서 이미 URL 인코딩된 상태로 발급됨.
+  // URLSearchParams.set()은 값을 재인코딩하므로 이중 인코딩 → 403 발생.
+  // serviceKey만 직접 쿼리스트링에 붙이고 나머지는 searchParams 사용.
+  const otherParams = new URLSearchParams({
+    LAWD_CD: lawdCd,
+    DEAL_YMD: dealYmd,
+    pageNo: String(pageNo),
+    numOfRows: String(numOfRows),
+    _type: 'json',
+  });
+  const finalUrl = `${endpoint}?serviceKey=${serviceKey}&${otherParams.toString()}`;
 
-  const res = await fetch(url.toString(), {
+  const res = await fetch(finalUrl, {
     headers: { 'Accept': 'application/json' },
   });
 
