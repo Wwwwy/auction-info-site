@@ -1,0 +1,26 @@
+name: test-public-api
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check secret exists
+        env:
+          MOLIT_API_KEY: ${{ secrets.MOLIT_API_KEY }}
+        run: |
+          if [ -z "$MOLIT_API_KEY" ]; then
+            echo "API key is empty"
+            exit 1
+          else
+            echo "API key exists (length: ${#MOLIT_API_KEY})"
+          fi
+
+      - name: Call API
+        env:
+          MOLIT_API_KEY: ${{ secrets.MOLIT_API_KEY }}
+        run: |
+          curl -v "https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev?serviceKey=${MOLIT_API_KEY}&LAWD_CD=11110&DEAL_YMD=202503&pageNo=1&numOfRows=10&_type=json"
