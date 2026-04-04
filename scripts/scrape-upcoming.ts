@@ -424,7 +424,7 @@ class UpcomingAuctionScraper {
       const hwangBtn = this.page.locator('#mf_wfm_mainFrame_btn_curstExmndcTop');
       const visible = await hwangBtn.isVisible().catch(() => false);
       if (visible) {
-        await hwangBtn.click();
+        await hwangBtn.click({ timeout: 5000 });
         await delay(3000);
       }
     } catch (e) {
@@ -447,7 +447,7 @@ class UpcomingAuctionScraper {
       const visible = await gamBtn.isVisible().catch(() => false);
       if (visible) {
         const newPagePromise = this.page.context().waitForEvent('page', { timeout: 8000 }).catch(() => null);
-        await gamBtn.click();
+        await gamBtn.click({ timeout: 5000 });
         const newTab = await newPagePromise;
         if (newTab) {
           await newTab.waitForLoadState('domcontentloaded').catch(() => null);
