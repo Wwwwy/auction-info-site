@@ -175,6 +175,7 @@ async function validateServiceKey(endpoint: string, serviceKey: string): Promise
     _type: 'json',
   });
   const url = `${endpoint}?serviceKey=${serviceKey}&${params.toString()}`;
+  console.log(`[DEBUG] 검증 URL: ${url}`);
 
   let res: Response;
   try {
