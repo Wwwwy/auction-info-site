@@ -475,8 +475,7 @@ if (allItems.length > 0) {
 
   await writer.close();
 } else {
-  // 데이터 없으면 빈 파일 생성
-  writeFileSync(outputPath, '');
+  console.log('수집된 데이터 없음 — parquet 파일 생성 생략');
 }
 
 console.log(`\n=== 수집 완료 ===`);
