@@ -23,6 +23,7 @@
  */
 
 import { writeFileSync, readFileSync, existsSync } from 'fs';
+import parquet from '@dsnp/parquetjs';
 
 // ── API 엔드포인트 ──
 const API_BASE = 'https://apis.data.go.kr/1613000';
@@ -339,7 +340,7 @@ if (regionArg === '전국') {
   }
 }
 
-const outputPath = args['output'] || '/tmp/molit-result.json';
+const outputPath = args['output'] || '/tmp/molit-result.parquet';
 const stateFilePath = args['state-file'] || null;
 const dryRun = args['dry-run'] === 'true';
 
@@ -432,24 +433,54 @@ if (stateFilePath && successCount > 0) {
   console.log(`[state] ${Object.keys(state.collected).length}개 키 저장 → ${stateFilePath}`);
 }
 
-// 결과 저장
-const output = {
-  meta: {
-    dataType,
-    regions: regionArg,
-    ymList,
-    totalItems: allItems.length,
-    successJobs: successCount,
-    skipJobs: skipCount,
-    errorJobs: errorCount,
-    collectedAt: new Date().toISOString(),
-  },
-  items: allItems,
+// 메타 저장 (요약 스텝용 별도 JSON)
+const meta = {
+  dataType,
+  regions: regionArg,
+  ymList,
+  totalItems: allItems.length,
+  successJobs: successCount,
+  skipJobs: skipCount,
+  errorJobs: errorCount,
+  collectedAt: new Date().toISOString(),
 };
+const metaPath = outputPath.replace(/\.parquet$/, '.meta.json');
+writeFileSync(metaPath, JSON.stringify(meta, null, 2));
 
-writeFileSync(outputPath, JSON.stringify(output, null, 2));
+// 결과 저장 (Parquet — GZIP 압축)
+if (allItems.length > 0) {
+  // 모든 아이템을 순회해 유니크 컬럼 수집
+  const allKeys = new Set<string>();
+  for (const item of allItems) {
+    for (const key of Object.keys(item)) allKeys.add(key);
+  }
+
+  // 스키마 정의: 모든 컬럼을 optional UTF8 문자열로 통일 (API 값이 숫자처럼 보여도 문자열로 오는 경우가 많음)
+  const schemaFields: Record<string, { type: string; compression: string; optional: boolean }> = {};
+  for (const key of allKeys) {
+    schemaFields[key] = { type: 'UTF8', compression: 'GZIP', optional: true };
+  }
+
+  const schema = new parquet.ParquetSchema(schemaFields);
+  const writer = await parquet.ParquetWriter.openFile(schema, outputPath);
+
+  for (const item of allItems) {
+    const row: Record<string, string | null> = {};
+    for (const key of allKeys) {
+      const val = item[key];
+      row[key] = val === null || val === undefined ? null : String(val);
+    }
+    await writer.appendRow(row);
+  }
+
+  await writer.close();
+} else {
+  // 데이터 없으면 빈 파일 생성
+  writeFileSync(outputPath, '');
+}
 
 console.log(`\n=== 수집 완료 ===`);
 console.log(`총 거래건수: ${allItems.length}건`);
 console.log(`성공: ${successCount}, 스킵: ${skipCount}, 실패: ${errorCount}`);
-console.log(`결과: ${outputPath}`);
+console.log(`결과: ${outputPath} (Parquet/GZIP)`);
+console.log(`메타: ${metaPath}`);
