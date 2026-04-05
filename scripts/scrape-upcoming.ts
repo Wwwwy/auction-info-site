@@ -25,6 +25,7 @@
 
 import { chromium, type Browser, type Page } from 'playwright';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
+import parquet from '@dsnp/parquetjs';
 
 // ── 법원 코드 (select option value) ──
 const COURT_NAMES = [
@@ -650,7 +651,7 @@ const args = parseArgs();
 const singleCourt = args['court'];
 const allCourts = args['all-courts'] === 'true';
 const limit = parseInt(args['limit'] ?? '1');
-const outputPath = args['output'] || '/tmp/upcoming-single.json';
+const outputPath = args['output'] || '/tmp/upcoming-single.parquet';
 const stateFilePath = args['state-file'] || null;
 const dryRun = args['dry-run'] === 'true';
 
@@ -706,26 +707,63 @@ if (stateFilePath && !dryRun && newCount > 0) {
   saveState(stateFilePath, state);
 }
 
-// 결과 저장
-const output = {
-  meta: {
-    courts: courtsToScrape,
-    collectedAt: new Date().toISOString(),
-    total: allResults.length,
-    newItems: newCount,
-    skippedItems: Object.keys(state.seenDocIds).length - newCount,
-    mode: allCourts ? 'all-courts' : 'single-court',
-    incremental: stateFilePath !== null,
-  },
-  results: allResults,
+// 메타 정의
+const meta = {
+  courts: courtsToScrape,
+  collectedAt: new Date().toISOString(),
+  total: allResults.length,
+  newItems: newCount,
+  skippedItems: Object.keys(state.seenDocIds).length - newCount,
+  mode: allCourts ? 'all-courts' : 'single-court',
+  incremental: stateFilePath !== null,
 };
 
 if (!dryRun) {
-  writeFileSync(outputPath, JSON.stringify(output, null, 2));
-  console.log(`[저장] ${outputPath} (${allResults.length}건)`);
+  // 메타 저장 (요약 스텝용 별도 JSON)
+  const metaPath = outputPath.replace(/\.parquet$/, '.meta.json');
+  writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+
+  // 결과 저장 (Parquet — GZIP 압축)
+  if (allResults.length > 0) {
+    // 유니크 컬럼 수집
+    const allKeys = new Set<string>();
+    for (const item of allResults) {
+      for (const key of Object.keys(item)) allKeys.add(key);
+    }
+
+    // 스키마: 모든 컬럼을 optional UTF8 (배열/객체는 JSON 문자열로 직렬화)
+    const schemaFields: Record<string, { type: string; compression: string; optional: boolean }> = {};
+    for (const key of allKeys) {
+      schemaFields[key] = { type: 'UTF8', compression: 'GZIP', optional: true };
+    }
+
+    const schema = new parquet.ParquetSchema(schemaFields);
+    const writer = await parquet.ParquetWriter.openFile(schema, outputPath);
+
+    for (const item of allResults) {
+      const row: Record<string, string | null> = {};
+      for (const key of allKeys) {
+        const val = (item as Record<string, unknown>)[key];
+        if (val === null || val === undefined) {
+          row[key] = null;
+        } else if (typeof val === 'object') {
+          row[key] = JSON.stringify(val);
+        } else {
+          row[key] = String(val);
+        }
+      }
+      await writer.appendRow(row);
+    }
+
+    await writer.close();
+    console.log(`[저장] ${outputPath} (${allResults.length}건, Parquet/GZIP)`);
+  } else {
+    console.log('[저장] 수집된 데이터 없음 — parquet 파일 생성 생략');
+  }
+  console.log(`[저장] ${outputPath.replace(/\.parquet$/, '.meta.json')} (메타)`);
 } else {
   console.log('\n[dry-run] 메타:');
-  console.log(JSON.stringify(output.meta, null, 2));
+  console.log(JSON.stringify(meta, null, 2));
   if (allResults.length > 0) {
     console.log('[dry-run] 첫 번째 결과:');
     console.log(JSON.stringify(allResults[0], null, 2).slice(0, 1000));

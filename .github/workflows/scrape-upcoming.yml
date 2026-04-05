@@ -26,7 +26,8 @@ on:
 
 env:
   STATE_FILE: /tmp/scrape-state.json
-  OUTPUT_FILE: /tmp/upcoming-result.json
+  OUTPUT_FILE: /tmp/upcoming-result.parquet
+  META_FILE: /tmp/upcoming-result.meta.json
   NODE_VERSION: '22'
 
 jobs:
@@ -115,36 +116,54 @@ jobs:
           key: scrape-state-${{ github.run_id }}
 
       # ── 결과 통계 ──
+      - name: pyarrow 설치
+        if: always()
+        run: pip install pyarrow --quiet
+
       - name: 수집 결과 통계
         if: always()
         run: |
-          if [ -f "${{ env.OUTPUT_FILE }}" ]; then
+          if [ -f "${{ env.META_FILE }}" ]; then
             python3 -c "
           import json
-          with open('${{ env.OUTPUT_FILE }}') as f:
-              d = json.load(f)
-          meta = d.get('meta', {})
-          results = d.get('results', [])
+          with open('${{ env.META_FILE }}') as f:
+              meta = json.load(f)
           courts = meta.get('courts', [])
           print(f'수집일시: {meta.get(\"collectedAt\")}')
           print(f'모드: {meta.get(\"mode\")} / 증분: {meta.get(\"incremental\")}')
           print(f'법원: {len(courts)}개 ({\" \".join(courts[:3])}...)')
           print(f'신규 물건: {meta.get(\"newItems\", 0)}건')
-          print(f'상세 수집: {len(results)}건')
+          print(f'상세 수집: {meta.get(\"total\", 0)}건')
           print(f'기수집 스킵: {meta.get(\"skippedItems\", 0)}건')
-          print()
-          # 법원별 통계
-          from collections import Counter
-          court_counts = Counter(r[\"courtName\"] for r in results)
-          for court, cnt in sorted(court_counts.items(), key=lambda x: -x[1])[:10]:
-              print(f'  {court}: {cnt}건')
-          print()
-          # 상세 (최대 5건)
-          for r in results[:5]:
-              photos = len(r.get(\"photos\", []))
-              print(f'  [{r[\"caseNumber\"]}] {r[\"propertyType\"]} | {r[\"auctionDate\"]} | {r[\"address\"][:35]}')
-              print(f'    감정가:{r[\"appraisedValue\"]:,} | 최저:{r[\"minBidPrice\"]:,}({r[\"minBidRate\"]}%) | 유찰:{r[\"failedBids\"]}회 | 사진:{photos}장')
           "
+          else
+            echo "메타 파일 없음"
+          fi
+
+          if [ -f "${{ env.OUTPUT_FILE }}" ] && [ -s "${{ env.OUTPUT_FILE }}" ]; then
+            python3 -c "
+          import pyarrow.parquet as pq, json
+          from collections import Counter
+          table = pq.read_table('${{ env.OUTPUT_FILE }}')
+          print(f'파케이 행수: {table.num_rows}건  컬럼수: {table.num_columns}개')
+
+          if table.num_rows > 0:
+              # 법원별 통계
+              if 'courtName' in table.schema.names:
+                  courts = table.column('courtName').to_pylist()
+                  for court, cnt in sorted(Counter(courts).items(), key=lambda x: -x[1])[:10]:
+                      print(f'  {court}: {cnt}건')
+              print()
+              # 상세 (최대 5건)
+              df = table.slice(0, 5).to_pydict()
+              for i in range(min(5, table.num_rows)):
+                  photos_raw = df.get('photos', [None])[i]
+                  photos_cnt = len(json.loads(photos_raw)) if photos_raw else 0
+                  print(f'  [{df[\"caseNumber\"][i]}] {df[\"propertyType\"][i]} | {df[\"auctionDate\"][i]} | {str(df[\"address\"][i])[:35]}')
+                  print(f'    감정가:{df[\"appraisedValue\"][i]} | 최저:{df[\"minBidPrice\"][i]}({df[\"minBidRate\"][i]}%) | 유찰:{df[\"failedBids\"][i]}회 | 사진:{photos_cnt}장')
+          "
+          elif [ -f "${{ env.OUTPUT_FILE }}" ]; then
+            echo "   (수집 데이터 없음 — 전량 스킵)"
           else
             echo "결과 파일 없음"
           fi
@@ -171,6 +190,7 @@ jobs:
           name: upcoming-result-${{ github.run_id }}
           path: |
             ${{ env.OUTPUT_FILE }}
+            ${{ env.META_FILE }}
             ${{ env.STATE_FILE }}
           retention-days: 30
           if-no-files-found: ignore
