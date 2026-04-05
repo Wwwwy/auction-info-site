@@ -1,0 +1,139 @@
+name: madangs.com 경매 데이터 수집
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '수집 모드'
+        required: false
+        default: 'incremental'
+        type: choice
+        options:
+          - incremental   # 증분 (마지막 수집일 이후 ~ 오늘)
+          - date-range    # 날짜 범위 지정
+          - full-reset    # 전체 재수집 (state 초기화, 2024-01-01부터)
+      start_date:
+        description: '시작일 (date-range 모드 시, YYYY-MM-DD)'
+        required: false
+        default: '2024-01-01'
+      end_date:
+        description: '종료일 (date-range 모드 시, YYYY-MM-DD, 기본: 오늘)'
+        required: false
+        default: ''
+      limit:
+        description: '날짜당 최대 수집 건수 (0=전체)'
+        required: false
+        default: '0'
+
+  schedule:
+    # 매일 10:30 KST (01:30 UTC) 실행
+    - cron: '30 1 * * *'
+
+env:
+  STATE_FILE: madangs-state.json
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STATE_FILE }}
+          key: madangs-state-${{ github.run_id }}
+          restore-keys: |
+            madangs-state-
+
+      - name: Full reset (state 초기화)
+        if: ${{ github.event.inputs.mode == 'full-reset' }}
+        run: rm -f ${{ env.STATE_FILE }}
+
+      - name: Determine date range
+        id: dates
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          MODE="${{ github.event.inputs.mode || 'incremental' }}"
+
+          if [ "$MODE" = "date-range" ]; then
+            START="${{ github.event.inputs.start_date }}"
+            END="${{ github.event.inputs.end_date }}"
+            if [ -z "$END" ]; then END="$TODAY"; fi
+
+          elif [ "$MODE" = "full-reset" ]; then
+            START="2024-01-01"
+            END="$TODAY"
+
+          else
+            # incremental: state 파일에서 마지막 수집일 이후부터
+            if [ -f "${{ env.STATE_FILE }}" ]; then
+              LAST_RUN=$(python3 -c "import json; d=json.load(open('${{ env.STATE_FILE }}')); print(d.get('lastRunAt','')[:10])" 2>/dev/null || echo "")
+              if [ -n "$LAST_RUN" ]; then
+                # 마지막 수집일 다음날부터
+                START=$(date -u -d "$LAST_RUN + 1 day" +%Y-%m-%d 2>/dev/null || date -u -j -v+1d -f "%Y-%m-%d" "$LAST_RUN" +%Y-%m-%d 2>/dev/null || echo "$LAST_RUN")
+              else
+                # state 있지만 날짜 없으면 어제부터
+                START=$(date -u -d "yesterday" +%Y-%m-%d 2>/dev/null || echo "$TODAY")
+              fi
+            else
+              # 첫 실행: 어제부터
+              START=$(date -u -d "yesterday" +%Y-%m-%d 2>/dev/null || echo "$TODAY")
+            fi
+            END="$TODAY"
+          fi
+
+          echo "start=$START" >> $GITHUB_OUTPUT
+          echo "end=$END" >> $GITHUB_OUTPUT
+          echo "수집 기간: $START ~ $END"
+
+      - name: Run scraper
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
+        run: |
+          LIMIT="${{ github.event.inputs.limit || '0' }}"
+          node --experimental-strip-types scripts/scrape-madangs.ts \
+            --start-date "${{ steps.dates.outputs.start }}" \
+            --end-date "${{ steps.dates.outputs.end }}" \
+            --limit "$LIMIT" \
+            --state-file "${{ env.STATE_FILE }}" \
+            --output madangs-results.parquet
+
+      - name: Save state cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STATE_FILE }}
+          key: madangs-state-${{ github.run_id }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: madangs-results-${{ github.run_id }}
+          path: |
+            madangs-results.parquet
+            madangs-results.meta.json
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f madangs-results.meta.json ]; then
+            echo "## 수집 결과" >> $GITHUB_STEP_SUMMARY
+            cat madangs-results.meta.json >> $GITHUB_STEP_SUMMARY
+          fi

@@ -1,0 +1,194 @@
+name: 매각결과 수집 (courtauction.go.kr)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '수집 모드'
+        required: false
+        default: 'incremental'
+        type: choice
+        options:
+          - incremental   # 증분 (신규물건만, 전체법원)
+          - full-reset    # 전체 재수집 (state 초기화)
+          - single-court  # 단일 법원 테스트
+      court:
+        description: '법원 이름 (single-court 모드 시)'
+        required: false
+        default: '서울중앙지방법원'
+      limit:
+        description: '법원별 수집 건수 (0=전체, 1=단건 테스트)'
+        required: false
+        default: '0'
+  schedule:
+    # 매일 오전 9시 KST (UTC 00:00)
+    - cron: '0 0 * * *'
+
+env:
+  STATE_FILE: /tmp/results-state.json
+  OUTPUT_FILE: /tmp/results.parquet
+  META_FILE: /tmp/results.meta.json
+  NODE_VERSION: '22'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # 전체법원 순환 시 최대 2시간
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: 의존성 설치
+        run: npm install
+
+      - name: Playwright 브라우저 설치
+        run: npx playwright install chromium --with-deps
+
+      # ── 증분 State 복원 ──
+      - name: State 파일 복원 (캐시)
+        id: cache-state
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STATE_FILE }}
+          key: results-state-${{ github.run_id }}
+          restore-keys: |
+            results-state-
+
+      - name: State 초기화 (full-reset 모드)
+        if: github.event.inputs.mode == 'full-reset'
+        run: |
+          rm -f ${{ env.STATE_FILE }}
+          echo "⚠️ State 초기화 완료 — 전체 재수집 모드"
+
+      - name: State 상태 확인
+        run: |
+          if [ -f "${{ env.STATE_FILE }}" ]; then
+            python3 -c "
+          import json
+          with open('${{ env.STATE_FILE }}') as f:
+              s = json.load(f)
+          seen = len(s.get('seenDocIds', {}))
+          print(f'📋 기수집 docid: {seen}개')
+          print(f'   마지막 실행: {s.get(\"lastRunAt\", \"없음\")}')
+          "
+          else
+            echo "📋 State 없음 — 최초 실행 (전체 수집)"
+          fi
+
+      # ── 수집 실행 ──
+      - name: 매각결과 수집 (증분/전체법원)
+        if: github.event.inputs.mode != 'single-court'
+        run: |
+          MODE="${{ github.event.inputs.mode || 'incremental' }}"
+          LIMIT="${{ github.event.inputs.limit || '0' }}"
+          echo "모드: $MODE, limit: $LIMIT"
+          node --experimental-strip-types scripts/scrape-results.ts \
+            --all-courts \
+            --limit "$LIMIT" \
+            --state-file "${{ env.STATE_FILE }}" \
+            --output "${{ env.OUTPUT_FILE }}"
+        timeout-minutes: 110
+
+      - name: 매각결과 수집 (단일 법원)
+        if: github.event.inputs.mode == 'single-court'
+        run: |
+          COURT="${{ github.event.inputs.court || '서울중앙지방법원' }}"
+          LIMIT="${{ github.event.inputs.limit || '0' }}"
+          echo "법원: $COURT, limit: $LIMIT"
+          node --experimental-strip-types scripts/scrape-results.ts \
+            --court "$COURT" \
+            --limit "$LIMIT" \
+            --state-file "${{ env.STATE_FILE }}" \
+            --output "${{ env.OUTPUT_FILE }}"
+        timeout-minutes: 30
+
+      # ── State 저장 (캐시) ──
+      - name: State 저장 (캐시 갱신)
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STATE_FILE }}
+          key: results-state-${{ github.run_id }}
+
+      # ── 결과 통계 ──
+      - name: pyarrow 설치
+        if: always()
+        run: pip install pyarrow --quiet
+
+      - name: 수집 결과 통계
+        if: always()
+        run: |
+          if [ -f "${{ env.META_FILE }}" ]; then
+            python3 -c "
+          import json
+          with open('${{ env.META_FILE }}') as f:
+              meta = json.load(f)
+          courts = meta.get('courts', [])
+          print(f'수집일시: {meta.get(\"collectedAt\")}')
+          print(f'모드: {meta.get(\"mode\")} / 증분: {meta.get(\"incremental\")}')
+          print(f'법원: {len(courts)}개')
+          print(f'신규 물건: {meta.get(\"newItems\", 0)}건')
+          print(f'상세 수집: {meta.get(\"total\", 0)}건')
+          print(f'기수집 스킵: {meta.get(\"skippedItems\", 0)}건')
+          "
+          else
+            echo "메타 파일 없음"
+          fi
+
+          if [ -f "${{ env.OUTPUT_FILE }}" ] && [ -s "${{ env.OUTPUT_FILE }}" ]; then
+            python3 -c "
+          import pyarrow.parquet as pq, json
+          from collections import Counter
+          table = pq.read_table('${{ env.OUTPUT_FILE }}')
+          print(f'파케이 행수: {table.num_rows}건  컬럼수: {table.num_columns}개')
+
+          if table.num_rows > 0:
+              if 'courtName' in table.schema.names:
+                  courts = table.column('courtName').to_pylist()
+                  for court, cnt in sorted(Counter(courts).items(), key=lambda x: -x[1])[:10]:
+                      print(f'  {court}: {cnt}건')
+              print()
+              df = table.slice(0, 5).to_pydict()
+              for i in range(min(5, table.num_rows)):
+                  dr_raw = df.get('dateRecords', [None])[i]
+                  dr_cnt = len(json.loads(dr_raw)) if dr_raw else 0
+                  print(f'  [{df[\"caseNumber\"][i]}] {df[\"propertyType\"][i]} | {df[\"auctionDate\"][i]}')
+                  print(f'    매각결과:{df[\"saleResult\"][i]} | 낙찰가:{df[\"saleBidPrice\"][i]} | 기일내역:{dr_cnt}건')
+          "
+          elif [ -f "${{ env.OUTPUT_FILE }}" ]; then
+            echo "   (수집 데이터 없음 — 전량 스킵)"
+          else
+            echo "결과 파일 없음"
+          fi
+
+      - name: State 최종 상태
+        if: always()
+        run: |
+          if [ -f "${{ env.STATE_FILE }}" ]; then
+            python3 -c "
+          import json
+          with open('${{ env.STATE_FILE }}') as f:
+              s = json.load(f)
+          seen = len(s.get('seenDocIds', {}))
+          print(f'📋 누적 수집 docid: {seen}개')
+          print(f'   마지막 실행: {s.get(\"lastRunAt\")}')
+          "
+          fi
+
+      # ── 결과 업로드 ──
+      - name: 결과 파일 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ github.run_id }}
+          path: |
+            ${{ env.OUTPUT_FILE }}
+            ${{ env.META_FILE }}
+            ${{ env.STATE_FILE }}
+          retention-days: 30
+          if-no-files-found: ignore
