@@ -42,7 +42,8 @@ on:
 
 env:
   STATE_FILE: /tmp/molit-state.json
-  OUTPUT_FILE: /tmp/molit-result.json
+  OUTPUT_FILE: /tmp/molit-result.parquet
+  META_FILE: /tmp/molit-result.meta.json
   NODE_VERSION: '22'
 
 jobs:
@@ -141,34 +142,47 @@ jobs:
             $STATE_ARG
 
       # ── 결과 요약 ──
+      - name: pyarrow 설치
+        if: always()
+        run: pip install pyarrow --quiet
+
       - name: 수집 결과 요약
         if: always()
         run: |
-          if [ -f "${{ env.OUTPUT_FILE }}" ]; then
+          if [ -f "${{ env.META_FILE }}" ]; then
             python3 -c "
           import json
-          with open('${{ env.OUTPUT_FILE }}') as f:
-              data = json.load(f)
-          meta = data.get('meta', {})
-          items = data.get('items', [])
+          with open('${{ env.META_FILE }}') as f:
+              meta = json.load(f)
           print(f'✅ 수집 완료')
           print(f'   유형: {meta.get(\"dataType\")}')
           print(f'   연월: {meta.get(\"ymList\")}')
           print(f'   지역: {meta.get(\"regions\")}')
-          print(f'   총 거래건수: {len(items):,}건')
+          print(f'   총 거래건수: {meta.get(\"totalItems\", 0):,}건')
           print(f'   성공: {meta.get(\"successJobs\")}  스킵: {meta.get(\"skipJobs\")}  실패: {meta.get(\"errorJobs\")}')
+          "
+          else
+            echo "메타 파일 없음"
+          fi
+
+          if [ -f "${{ env.OUTPUT_FILE }}" ]; then
+            python3 -c "
+          import pyarrow.parquet as pq
+          from collections import Counter
+          table = pq.read_table('${{ env.OUTPUT_FILE }}')
+          print(f'   파케이 행수: {table.num_rows:,}건  컬럼수: {table.num_columns}개')
 
           # 지역별 통계 (상위 10)
-          if items:
-              from collections import Counter
-              by_region = Counter(str(item.get('_lawdCd', ''))[:5] for item in items)
+          if table.num_rows > 0 and '_lawdCd' in table.schema.names:
+              codes = table.column('_lawdCd').to_pylist()
+              by_region = Counter(str(c)[:5] for c in codes if c)
               print()
               print('상위 10개 시군구:')
               for code, cnt in by_region.most_common(10):
                   print(f'  {code}: {cnt:,}건')
           "
           else
-            echo "결과 파일 없음"
+            echo "결과 파일(parquet) 없음"
           fi
 
           if [ -f "${{ env.STATE_FILE }}" ]; then
@@ -189,6 +203,7 @@ jobs:
           name: molit-result-${{ github.event.inputs.type || 'apt-trade' }}-${{ github.run_id }}
           path: |
             ${{ env.OUTPUT_FILE }}
+            ${{ env.META_FILE }}
             ${{ env.STATE_FILE }}
           retention-days: 90
           if-no-files-found: ignore
