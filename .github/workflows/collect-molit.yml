@@ -165,7 +165,7 @@ jobs:
             echo "메타 파일 없음"
           fi
 
-          if [ -f "${{ env.OUTPUT_FILE }}" ]; then
+          if [ -f "${{ env.OUTPUT_FILE }}" ] && [ -s "${{ env.OUTPUT_FILE }}" ]; then
             python3 -c "
           import pyarrow.parquet as pq
           from collections import Counter
@@ -181,6 +181,8 @@ jobs:
               for code, cnt in by_region.most_common(10):
                   print(f'  {code}: {cnt:,}건')
           "
+          elif [ -f "${{ env.OUTPUT_FILE }}" ]; then
+            echo "   (수집 데이터 없음 — 전량 스킵)"
           else
             echo "결과 파일(parquet) 없음"
           fi
