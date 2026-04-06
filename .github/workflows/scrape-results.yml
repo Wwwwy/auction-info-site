@@ -157,8 +157,9 @@ jobs:
               for i in range(min(5, table.num_rows)):
                   dr_raw = df.get('dateRecords', [None])[i]
                   dr_cnt = len(json.loads(dr_raw)) if dr_raw else 0
+                  win_price = df.get('winBidPrice', [None])[i]
                   print(f'  [{df[\"caseNumber\"][i]}] {df[\"propertyType\"][i]} | {df[\"auctionDate\"][i]}')
-                  print(f'    매각결과:{df[\"saleResult\"][i]} | 낙찰가:{df[\"saleBidPrice\"][i]} | 기일내역:{dr_cnt}건')
+                  print(f'    낙찰가:{win_price} | 기일내역:{dr_cnt}건')
           "
           elif [ -f "${{ env.OUTPUT_FILE }}" ]; then
             echo "   (수집 데이터 없음 — 전량 스킵)"
