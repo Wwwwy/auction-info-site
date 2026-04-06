@@ -9,6 +9,7 @@
  *  - offi-rent    : 오피스텔 전월세
  *  - rh-trade     : 연립다세대 매매
  *  - sh-trade     : 단독다가구 매매
+ *  - nrg-trade    : 상업업무용 부동산 매매
  *
  * 실행:
  *  node --experimental-strip-types scripts/collect-molit.ts [옵션]
@@ -39,10 +40,11 @@ const BROWSER_HEADERS = {
 const ENDPOINTS: Record<string, string> = {
   'apt-trade':  `${API_BASE}/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev`,
   'apt-rent':   `${API_BASE}/RTMSDataSvcAptRentDev/getRTMSDataSvcAptRentDev`,
-  'offi-trade': `${API_BASE}/RTMSOBJSvc/getRTMSDataSvcOffiTrade`,
-  'offi-rent':  `${API_BASE}/RTMSOBJSvc/getRTMSDataSvcOffiRent`,
-  'rh-trade':   `${API_BASE}/RTMSOBJSvc/getRTMSDataSvcRHTrade`,
-  'sh-trade':   `${API_BASE}/RTMSOBJSvc/getRTMSDataSvcSHTrade`,
+  'offi-trade': `${API_BASE}/RTMSDataSvcOffiTrade/getRTMSDataSvcOffiTrade`,
+  'offi-rent':  `${API_BASE}/RTMSDataSvcOffiRent/getRTMSDataSvcOffiRent`,
+  'rh-trade':   `${API_BASE}/RTMSDataSvcRHTrade/getRTMSDataSvcRHTrade`,
+  'sh-trade':   `${API_BASE}/RTMSDataSvcSHTrade/getRTMSDataSvcSHTrade`,
+  'nrg-trade':  `${API_BASE}/RTMSDataSvcNrgTrade/getRTMSDataSvcNrgTrade`,
 };
 
 // ── 시군구 코드 (법정동 앞 5자리) ──

@@ -15,6 +15,7 @@ on:
           - offi-rent    # 오피스텔 전월세
           - rh-trade     # 연립다세대 매매
           - sh-trade     # 단독다가구 매매
+          - nrg-trade    # 상업업무용 부동산 매매
       ym:
         description: '수집 연월 (YYYYMM, 빈 칸이면 전월 자동)'
         required: false
