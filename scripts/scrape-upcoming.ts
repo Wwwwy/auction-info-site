@@ -725,10 +725,13 @@ if (!dryRun) {
 
   // 결과 저장 (Parquet — GZIP 압축)
   if (allResults.length > 0) {
-    // 유니크 컬럼 수집
+    // 유니크 컬럼 수집 (pdfBase64 제외 — 대용량 binary로 parquet 파일 손상 유발)
+    const EXCLUDE_KEYS = new Set(['pdfBase64']);
     const allKeys = new Set<string>();
     for (const item of allResults) {
-      for (const key of Object.keys(item)) allKeys.add(key);
+      for (const key of Object.keys(item)) {
+        if (!EXCLUDE_KEYS.has(key)) allKeys.add(key);
+      }
     }
 
     // 스키마: 모든 컬럼을 optional UTF8 (배열/객체는 JSON 문자열로 직렬화)

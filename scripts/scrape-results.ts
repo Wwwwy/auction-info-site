@@ -169,29 +169,32 @@ class AuctionResultScraper {
     // 페이지 버튼 존재 여부 확인
     const btnExists = await this.page.locator(`#${btnId}`).count().then(n => n > 0).catch(() => false);
     if (!btnExists) {
-      // 다음 페이지 그룹 버튼 클릭 시도 (여러 패턴 시도)
-      const clicked = await this.page.evaluate(() => {
-        // w2pageList 프레임워크의 next 버튼 탐색
-        const candidates = [
-          document.querySelector('.w2pageList_col_nextPage'),
-          document.querySelector('.w2pageList_col_next'),
-          // JavaScript로 페이지 변경 함수 직접 호출 시도
-        ];
-        for (const el of candidates) {
-          if (el) { (el as HTMLElement).click(); return true; }
-        }
-        // A 태그 중 마지막 페이지 번호 다음에 오는 버튼 탐색
-        const pageLinks = Array.from(document.querySelectorAll('a[id*="page_"]'));
-        if (pageLinks.length > 0) {
-          const lastLink = pageLinks[pageLinks.length - 1];
-          const nextEl = lastLink.parentElement?.nextElementSibling;
-          if (nextEl) { (nextEl as HTMLElement).click(); return true; }
-        }
-        return false;
-      });
-      if (clicked) {
-        await delay(3000);
+      // 다음 페이지 그룹 버튼을 API 인터셉터 안에서 클릭 (그룹 이동이 곧 페이지 데이터 로드)
+      const nextGroupResult = await this.interceptSearchAndClick(() =>
+        this.page.evaluate(() => {
+          const candidates = [
+            document.querySelector('.w2pageList_col_nextPage'),
+            document.querySelector('.w2pageList_col_next'),
+          ];
+          for (const el of candidates) {
+            if (el) { (el as HTMLElement).click(); return; }
+          }
+          const pageLinks = Array.from(document.querySelectorAll('a[id*="page_"]'));
+          if (pageLinks.length > 0) {
+            const lastLink = pageLinks[pageLinks.length - 1];
+            const nextEl = lastLink.parentElement?.nextElementSibling;
+            if (nextEl) { (nextEl as HTMLElement).click(); }
+          }
+        }) as Promise<void>
+      ).catch(() => null);
+
+      if (nextGroupResult && nextGroupResult.items.length > 0) {
+        console.log(`    페이지 ${pageNum}: ${nextGroupResult.items.length}건 수신 (next-group 경유)`);
+        return nextGroupResult;
       }
+
+      // next-group으로 데이터를 못 받은 경우 — 버튼 렌더링 대기 후 재시도
+      await delay(3000);
     }
 
     const result = await this.interceptSearchAndClick(() =>
